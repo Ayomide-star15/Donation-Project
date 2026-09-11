@@ -23,3 +23,6 @@ def get_supabase(creds: HTTPAuthorizationCredentials = Depends(bearer_scheme)) -
     client = create_client(settings.SUPABASE_URL, settings.SUPABASE_ANON_KEY)
     client.postgrest.auth(creds.credentials)
     return client
+
+def get_supabase_admin() -> Client:
+    return create_client(settings.SUPABASE_URL, settings.SUPABASE_SERVICE_ROLE_KEY)
