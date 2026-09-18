@@ -1,21 +1,16 @@
-import uuid
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
-import jwt
-from fastapi import Depends, HTTPException, status
-from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from fastapi import Cookie, Depends, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session as DbSession
 
+from app.core.config import settings
 from app.core.database import get_db
 from app.core.enums import UserStatus
-from app.core.security import decode_signed_token
+from app.core.security import hash_token
 from app.modules.auth.models import Session
 from app.modules.users.models import Role, User, UserRole
-
-
-bearer_scheme = HTTPBearer(auto_error=False)
 
 
 @dataclass
@@ -25,34 +20,36 @@ class AuthContext:
 
 
 def get_auth_context(
-    credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
+    raw_session: str | None = Cookie(default=None, alias=settings.SESSION_COOKIE_NAME),
     db: DbSession = Depends(get_db),
 ) -> AuthContext:
     unauthorized = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="Authentication required",
-        headers={"WWW-Authenticate": "Bearer"},
     )
-    if credentials is None:
-        raise unauthorized
-    try:
-        payload = decode_signed_token(credentials.credentials, "access")
-        user_id = uuid.UUID(payload["sub"])
-        session_id = uuid.UUID(payload["sid"])
-    except (jwt.InvalidTokenError, KeyError, ValueError):
+    if raw_session is None:
         raise unauthorized
 
-    user = db.get(User, user_id)
-    session = db.get(Session, session_id)
+    session = db.scalar(select(Session).where(Session.token_hash == hash_token(raw_session)))
+    if session is None:
+        raise unauthorized
+
+    now = datetime.now(UTC)
     if (
-        user is None
-        or user.status != UserStatus.ACTIVE
-        or session is None
-        or session.user_id != user.id
-        or session.revoked_at is not None
-        or session.expires_at <= datetime.now(UTC)
+        session.revoked_at is not None
+        or session.expires_at <= now
+        or (session.idle_expires_at is not None and session.idle_expires_at <= now)
     ):
         raise unauthorized
+
+    user = db.get(User, session.user_id)
+    if user is None or user.status != UserStatus.ACTIVE:
+        raise unauthorized
+
+    if now - session.last_seen_at >= timedelta(minutes=5):
+        session.last_seen_at = now
+        session.idle_expires_at = now + timedelta(minutes=settings.SESSION_IDLE_MINUTES)
+        db.commit()
     return AuthContext(user=user, session=session)
 
 

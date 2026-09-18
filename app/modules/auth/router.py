@@ -1,6 +1,6 @@
 import uuid
 
-from fastapi import APIRouter, Cookie, Depends, HTTPException, Request, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session as DbSession
 
@@ -9,28 +9,25 @@ from app.core.database import get_db
 from app.modules.auth.dependencies import AuthContext, get_auth_context
 from app.modules.auth.models import Session
 from app.modules.auth.schemas import (
+    AuthenticatedResponse,
     ChangePasswordRequest,
-    LoginChallengeResponse,
     LoginRequest,
-    MfaSetupRequest,
-    MfaSetupResponse,
-    MfaRecoveryRequest,
-    MfaVerifyRequest,
+    LoginResponse,
+    OtpChallengeResponse,
+    OtpResendRequest,
+    OtpVerifyRequest,
     SessionResponse,
-    TokenResponse,
     UserResponse,
 )
 from app.modules.auth.service import (
     authenticate_password,
-    begin_mfa_setup,
     change_password,
+    resend_email_otp,
     revoke_all_sessions,
     revoke_session,
-    rotate_refresh_token,
-    use_recovery_code_and_create_session,
-    verify_mfa_and_create_session,
+    verify_email_otp,
 )
-
+from app.modules.notifications.email import EmailService, get_email_service
 
 router = APIRouter(prefix="/auth", tags=["authentication"])
 
@@ -42,153 +39,150 @@ def _request_metadata(request: Request) -> tuple[str | None, str | None]:
 
 def _validate_browser_origin(request: Request) -> None:
     origin = request.headers.get("origin")
-    if origin and origin.rstrip("/") != settings.FRONTEND_URL.rstrip("/"):
+    allowed_origins = {
+        settings.FRONTEND_URL.rstrip("/"),
+        settings.API_PUBLIC_URL.rstrip("/"),
+    }
+    if origin and origin.rstrip("/") not in allowed_origins:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Origin is not allowed")
 
 
-def _set_refresh_cookie(response: Response, token: str) -> None:
+def _set_session_cookie(response: Response, token: str) -> None:
     response.set_cookie(
-        key=settings.REFRESH_COOKIE_NAME,
+        key=settings.SESSION_COOKIE_NAME,
         value=token,
-        max_age=settings.REFRESH_TOKEN_DAYS * 24 * 60 * 60,
+        max_age=settings.SESSION_HOURS * 60 * 60,
         secure=settings.COOKIE_SECURE,
         httponly=True,
         samesite="lax",
         domain=settings.COOKIE_DOMAIN,
-        path=f"{settings.API_V1_PREFIX}/auth",
+        path="/",
     )
 
 
-def _delete_refresh_cookie(response: Response) -> None:
+def _delete_session_cookie(response: Response) -> None:
     response.delete_cookie(
-        key=settings.REFRESH_COOKIE_NAME,
+        key=settings.SESSION_COOKIE_NAME,
         domain=settings.COOKIE_DOMAIN,
-        path=f"{settings.API_V1_PREFIX}/auth",
+        path="/",
     )
 
 
-@router.post("/login", response_model=LoginChallengeResponse)
+@router.post("/login", response_model=LoginResponse)
 def login(
     payload: LoginRequest,
     request: Request,
+    response: Response,
     db: DbSession = Depends(get_db),
-) -> LoginChallengeResponse:
+    email_service: EmailService = Depends(get_email_service),
+) -> LoginResponse:
+    _validate_browser_origin(request)
     ip_address, user_agent = _request_metadata(request)
-    _, purpose, challenge = authenticate_password(
+    result = authenticate_password(
         db,
+        email_service,
         str(payload.email),
         payload.password,
         ip_address=ip_address,
         user_agent=user_agent,
     )
-    next_step = "mfa_verify" if purpose == "mfa_verify" else "mfa_setup"
-    return LoginChallengeResponse(next_step=next_step, challenge_token=challenge)
+    if result.issued_session:
+        _set_session_cookie(response, result.issued_session.raw_token)
+        return LoginResponse(status="authenticated")
+
+    assert result.challenge is not None
+    return LoginResponse(
+        status="otp_required",
+        challenge_id=result.challenge.id,
+        expires_in=settings.OTP_EXPIRY_MINUTES * 60,
+        masked_email=result.masked_email,
+    )
 
 
-@router.post("/mfa/setup", response_model=MfaSetupResponse)
-def setup_mfa(
-    payload: MfaSetupRequest,
-    db: DbSession = Depends(get_db),
-) -> MfaSetupResponse:
-    return MfaSetupResponse(provisioning_uri=begin_mfa_setup(db, payload.challenge_token))
-
-
-@router.post("/mfa/verify", response_model=TokenResponse)
-def verify_mfa(
-    payload: MfaVerifyRequest,
+@router.post("/otp/verify", response_model=AuthenticatedResponse)
+def verify_otp(
+    payload: OtpVerifyRequest,
     request: Request,
     response: Response,
     db: DbSession = Depends(get_db),
-) -> TokenResponse:
+) -> AuthenticatedResponse:
+    _validate_browser_origin(request)
     ip_address, user_agent = _request_metadata(request)
-    issued = verify_mfa_and_create_session(
+    issued = verify_email_otp(
         db,
-        payload.challenge_token,
+        payload.challenge_id,
         payload.code,
         ip_address=ip_address,
         user_agent=user_agent,
     )
-    _set_refresh_cookie(response, issued.refresh_token)
-    return TokenResponse(
-        access_token=issued.access_token,
-        expires_in=settings.ACCESS_TOKEN_MINUTES * 60,
-        recovery_codes=issued.recovery_codes,
-    )
+    _set_session_cookie(response, issued.raw_token)
+    return AuthenticatedResponse()
 
 
-@router.post("/refresh", response_model=TokenResponse)
-def refresh(
+@router.post("/otp/resend", response_model=OtpChallengeResponse)
+def resend_otp(
+    payload: OtpResendRequest,
     request: Request,
-    response: Response,
-    refresh_token: str | None = Cookie(default=None, alias=settings.REFRESH_COOKIE_NAME),
     db: DbSession = Depends(get_db),
-) -> TokenResponse:
+    email_service: EmailService = Depends(get_email_service),
+) -> OtpChallengeResponse:
     _validate_browser_origin(request)
-    if refresh_token is None:
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Refresh token is missing")
-    issued = rotate_refresh_token(db, refresh_token)
-    _set_refresh_cookie(response, issued.refresh_token)
-    return TokenResponse(
-        access_token=issued.access_token,
-        expires_in=settings.ACCESS_TOKEN_MINUTES * 60,
-    )
-
-
-@router.post("/mfa/recover", response_model=TokenResponse)
-def recover_mfa(
-    payload: MfaRecoveryRequest,
-    request: Request,
-    response: Response,
-    db: DbSession = Depends(get_db),
-) -> TokenResponse:
     ip_address, user_agent = _request_metadata(request)
-    issued = use_recovery_code_and_create_session(
+    challenge, masked_email = resend_email_otp(
         db,
-        payload.challenge_token,
-        payload.recovery_code,
+        email_service,
+        payload.challenge_id,
         ip_address=ip_address,
         user_agent=user_agent,
     )
-    _set_refresh_cookie(response, issued.refresh_token)
-    return TokenResponse(
-        access_token=issued.access_token,
-        expires_in=settings.ACCESS_TOKEN_MINUTES * 60,
+    return OtpChallengeResponse(
+        challenge_id=challenge.id,
+        expires_in=settings.OTP_EXPIRY_MINUTES * 60,
+        resend_after=settings.OTP_RESEND_COOLDOWN_SECONDS,
+        masked_email=masked_email,
     )
 
 
 @router.post("/logout", status_code=204)
 def logout(
+    request: Request,
     response: Response,
     context: AuthContext = Depends(get_auth_context),
     db: DbSession = Depends(get_db),
 ) -> None:
+    _validate_browser_origin(request)
     revoke_session(db, context.session, "logout")
-    _delete_refresh_cookie(response)
+    _delete_session_cookie(response)
 
 
 @router.post("/logout-all", status_code=204)
 def logout_all(
+    request: Request,
     response: Response,
     context: AuthContext = Depends(get_auth_context),
     db: DbSession = Depends(get_db),
 ) -> None:
+    _validate_browser_origin(request)
     revoke_all_sessions(db, context.user.id, "logout_all")
-    _delete_refresh_cookie(response)
+    _delete_session_cookie(response)
 
 
 @router.post("/change-password", status_code=204)
 def update_password(
     payload: ChangePasswordRequest,
+    request: Request,
     response: Response,
     context: AuthContext = Depends(get_auth_context),
     db: DbSession = Depends(get_db),
 ) -> None:
+    _validate_browser_origin(request)
     change_password(db, context.user, payload.current_password, payload.new_password)
-    _delete_refresh_cookie(response)
+    _delete_session_cookie(response)
 
 
-@router.get("/me", response_model=UserResponse)
-def me(context: AuthContext = Depends(get_auth_context)) -> UserResponse:
+@router.get("/session", response_model=UserResponse)
+@router.get("/me", response_model=UserResponse, include_in_schema=False)
+def current_session(context: AuthContext = Depends(get_auth_context)) -> UserResponse:
     return UserResponse.model_validate(context.user)
 
 
@@ -201,7 +195,7 @@ def list_sessions(
         db.scalars(
             select(Session)
             .where(Session.user_id == context.user.id, Session.revoked_at.is_(None))
-            .order_by(Session.last_used_at.desc())
+            .order_by(Session.last_seen_at.desc())
         )
     )
 
@@ -209,10 +203,15 @@ def list_sessions(
 @router.delete("/sessions/{session_id}", status_code=204)
 def delete_session(
     session_id: uuid.UUID,
+    request: Request,
+    response: Response,
     context: AuthContext = Depends(get_auth_context),
     db: DbSession = Depends(get_db),
 ) -> None:
+    _validate_browser_origin(request)
     session = db.get(Session, session_id)
     if session is None or session.user_id != context.user.id:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Session not found")
     revoke_session(db, session, "user_revoked")
+    if session.id == context.session.id:
+        _delete_session_cookie(response)

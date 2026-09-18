@@ -9,14 +9,15 @@ API behavior, authorization, audit events, and tests are complete.
 - [x] Add PostgreSQL, SQLAlchemy, and Alembic
 - [x] Combine identity and password credentials in `users`
 - [x] Add Argon2id password hashing
-- [x] Add one-time MFA challenges and encrypted TOTP secrets
-- [x] Add one-time MFA recovery codes
-- [x] Add short-lived JWT access tokens
-- [x] Add rotating, hashed refresh tokens and device sessions
+- [x] Add single-use, expiring email OTP challenges
+- [x] Protect OTPs with keyed HMAC hashing
+- [x] Add opaque, hashed server-side sessions
+- [x] Add provider-neutral console and SMTP email adapters
 - [x] Add session listing and revocation
 - [x] Add login lockout and authentication audit events
 - [x] Add Super Admin bootstrap command
-- [ ] Add password-reset and email-delivery integration
+- [ ] Add production transactional email provider
+- [ ] Add password-reset flow
 - [ ] Execute automated tests against PostgreSQL in CI
 
 ## 2. Authorization and platform policy
@@ -68,8 +69,8 @@ API behavior, authorization, audit events, and tests are complete.
 
 ```text
 Bootstrap Super Admin
-→ enroll MFA
-→ log in
+→ log in with password
+→ verify email OTP
 → create hospital
 → create community
 → invite Community Admin

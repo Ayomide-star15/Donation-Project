@@ -9,10 +9,6 @@ class UserStatus(StrEnum):
     DISABLED = "disabled"
 
 
-class MfaMethodType(StrEnum):
-    TOTP = "totp"
-
-
 class AuditOutcome(StrEnum):
     SUCCESS = "success"
     FAILURE = "failure"

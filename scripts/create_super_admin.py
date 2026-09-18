@@ -8,11 +8,11 @@ from sqlalchemy import select
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from app.core.database import SessionLocal  # noqa: E402
-from app.core.enums import UserStatus  # noqa: E402
-from app.core.security import hash_password  # noqa: E402
-from app.modules.audit.service import add_audit_log  # noqa: E402
-from app.modules.users.models import Role, User, UserRole  # noqa: E402
+from app.core.database import SessionLocal
+from app.core.enums import UserStatus
+from app.core.security import hash_password
+from app.modules.audit.service import add_audit_log
+from app.modules.users.models import Role, User, UserRole
 
 
 def parse_args() -> argparse.Namespace:
@@ -67,7 +67,7 @@ def main() -> None:
             target_id=str(user.id),
         )
         db.commit()
-        print(f"Created Super Admin {email}. MFA enrollment is required on first login.")
+        print(f"Created Super Admin {email}. Email OTP is required on every login.")
 
 
 if __name__ == "__main__":

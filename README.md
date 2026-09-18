@@ -9,9 +9,9 @@ The first Phase 1 foundation includes:
 
 - combined user identity and password credentials
 - Argon2id password hashing
-- mandatory TOTP enrollment during the first Super Admin login
-- short-lived JWT access tokens
-- rotating refresh tokens stored as hashes in database sessions
+- email OTP on every Super Admin login
+- opaque server-side sessions stored as hashes
+- local console and SMTP email-delivery adapters
 - logout, logout-all, session listing, and account-state enforcement
 - platform roles and permissions schema
 - security audit-log schema and authentication events
@@ -36,16 +36,28 @@ py -3.12 -m venv .venv
 python -m pip install -r requirements.txt
 ```
 
-Copy `.env.example` to `.env`. The application intentionally has no built-in database
-password, JWT secret, or MFA encryption key; it will refuse to start until they are
-provided through the environment. Generate an MFA encryption key with:
+The application intentionally has no built-in database password or OTP pepper. Add
+the required values to `.env`. Generate the OTP pepper with:
 
 ```powershell
-python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+python -c "import secrets; print(secrets.token_urlsafe(48))"
 ```
 
-Generate a separate random `JWT_SECRET` of at least 32 bytes. Never reuse the MFA
-encryption key as the JWT secret.
+For local development, the minimum configuration is:
+
+```env
+DATABASE_URL=postgresql+psycopg://lifelink:lifelink@localhost:5432/lifelink
+OTP_PEPPER=paste-the-generated-random-value-here
+OTP_MODE=fixed
+FIXED_OTP_CODE=123456
+FRONTEND_URL=http://localhost:3000
+API_PUBLIC_URL=http://127.0.0.1:8000
+EMAIL_BACKEND=console
+COOKIE_SECURE=false
+```
+
+Fixed OTP mode and the console adapter are for development or test staging only.
+Production rejects fixed OTP and console delivery at startup.
 
 Start PostgreSQL and migrate the database:
 
@@ -73,15 +85,12 @@ API documentation is available at `http://localhost:8000/docs`.
 
 ## Authentication flow
 
-1. `POST /api/v1/auth/login` validates email and password and returns an MFA challenge.
-2. On first login, `POST /api/v1/auth/mfa/setup` returns a TOTP provisioning URI.
-3. `POST /api/v1/auth/mfa/verify` verifies the code, returns an access token, and sets
-   the rotating refresh token as an HttpOnly cookie.
-   The one-time recovery codes returned after enrollment can be used through
-   `POST /api/v1/auth/mfa/recover`.
-4. The frontend sends the access token as `Authorization: Bearer <token>`.
-5. `POST /api/v1/auth/refresh` rotates the refresh token and returns a new access token.
+1. `POST /api/v1/auth/login` validates the password and emails an OTP for Super Admins.
+2. `POST /api/v1/auth/otp/verify` consumes the OTP and creates a server-side session.
+3. The browser receives only an opaque `lifelink_session` HttpOnly cookie.
+4. `GET /api/v1/auth/session` loads current identity from the database session.
+5. `POST /api/v1/auth/logout` revokes the database session and removes the cookie.
 
 For production, deploy the frontend and API on sibling domains such as
 `app.lifelink.com` and `api.lifelink.com`, set `COOKIE_SECURE=true`, and configure
-`FRONTEND_URL` to the exact frontend origin.
+`FRONTEND_URL` to the exact frontend origin. Frontend requests must include credentials.

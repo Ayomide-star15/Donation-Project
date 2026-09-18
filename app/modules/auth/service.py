@@ -1,61 +1,76 @@
-import hmac
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
-import jwt
-import pyotp
 from fastapi import HTTPException, status
-from sqlalchemy import delete, select, update
+from sqlalchemy import select, update
 from sqlalchemy.orm import Session as DbSession
 
 from app.core.config import settings
-from app.core.enums import AuditOutcome, MfaMethodType, UserStatus
+from app.core.enums import AuditOutcome, UserStatus
 from app.core.security import (
-    create_access_token,
-    create_signed_token,
-    decode_signed_token,
-    decrypt_mfa_secret,
-    encrypt_mfa_secret,
+    generate_otp,
     generate_token,
+    hash_otp,
     hash_password,
     hash_token,
+    verify_otp,
     verify_password,
 )
 from app.modules.audit.service import add_audit_log
-from app.modules.auth.models import AuthChallenge, MfaMethod, MfaRecoveryCode, Session
-from app.modules.users.models import User
-
+from app.modules.auth.models import OtpChallenge, Session
+from app.modules.notifications.email import EmailDeliveryError, EmailService
+from app.modules.users.models import Role, User, UserRole
 
 MAX_FAILED_LOGINS = 5
 LOCK_MINUTES = 15
-RECOVERY_CODE_COUNT = 10
 _DUMMY_PASSWORD_HASH = hash_password(generate_token())
 
 
 @dataclass
 class IssuedSession:
-    access_token: str
-    refresh_token: str
-    recovery_codes: list[str] | None = None
+    session: Session
+    raw_token: str
+
+
+@dataclass
+class LoginResult:
+    status: str
+    issued_session: IssuedSession | None = None
+    challenge: OtpChallenge | None = None
+    masked_email: str | None = None
+
+
+def mask_email(email: str) -> str:
+    local, domain = email.split("@", maxsplit=1)
+    visible = local[0] if local else "*"
+    return f"{visible}{'*' * max(3, len(local) - 1)}@{domain}"
 
 
 def _auth_error() -> HTTPException:
-    return HTTPException(
-        status_code=status.HTTP_401_UNAUTHORIZED,
-        detail="Invalid email or password",
-        headers={"WWW-Authenticate": "Bearer"},
+    return HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid email or password")
+
+
+def _user_has_role(db: DbSession, user_id: uuid.UUID, role_name: str) -> bool:
+    return (
+        db.scalar(
+            select(UserRole.id)
+            .join(Role, Role.id == UserRole.role_id)
+            .where(UserRole.user_id == user_id, Role.name == role_name)
+        )
+        is not None
     )
 
 
 def authenticate_password(
     db: DbSession,
+    email_service: EmailService,
     email: str,
     password: str,
     *,
     ip_address: str | None,
     user_agent: str | None,
-) -> tuple[User, str, str]:
+) -> LoginResult:
     normalized_email = email.strip().lower()
     user = db.scalar(select(User).where(User.email == normalized_email))
     now = datetime.now(UTC)
@@ -118,233 +133,238 @@ def authenticate_password(
 
     user.failed_login_attempts = 0
     user.locked_until = None
-    mfa = db.scalar(
-        select(MfaMethod).where(
-            MfaMethod.user_id == user.id,
-            MfaMethod.method == MfaMethodType.TOTP,
-            MfaMethod.disabled_at.is_(None),
+
+    if _user_has_role(db, user.id, "super_admin"):
+        challenge = _begin_otp_challenge(
+            db,
+            email_service,
+            user,
+            purpose="super_admin_login",
+            ip_address=ip_address,
+            user_agent=user_agent,
         )
-    )
-    purpose = "mfa_verify" if mfa and mfa.verified_at else "mfa_setup"
-    challenge_record = AuthChallenge(
-        user_id=user.id,
-        purpose=purpose,
-        expires_at=now + timedelta(minutes=settings.MFA_CHALLENGE_MINUTES),
-    )
-    db.add(challenge_record)
-    db.flush()
-    challenge = create_signed_token(
-        user.id,
-        purpose,
-        timedelta(minutes=settings.MFA_CHALLENGE_MINUTES),
-        jti=str(challenge_record.id),
-    )
-    db.commit()
-    return user, purpose, challenge
-
-
-def begin_mfa_setup(db: DbSession, challenge_token: str) -> str:
-    try:
-        payload = decode_signed_token(challenge_token, "mfa_setup")
-        user_id = uuid.UUID(payload["sub"])
-        challenge_id = uuid.UUID(payload["jti"])
-    except (jwt.InvalidTokenError, KeyError, ValueError) as exc:
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid or expired challenge") from exc
-
-    user = db.get(User, user_id)
-    challenge = db.get(AuthChallenge, challenge_id)
-    if (
-        user is None
-        or user.status != UserStatus.ACTIVE
-        or challenge is None
-        or challenge.user_id != user.id
-        or challenge.purpose != "mfa_setup"
-        or challenge.used_at is not None
-        or challenge.expires_at <= datetime.now(UTC)
-    ):
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid or expired challenge")
-
-    secret = pyotp.random_base32()
-    method = db.scalar(
-        select(MfaMethod).where(
-            MfaMethod.user_id == user.id,
-            MfaMethod.method == MfaMethodType.TOTP,
+        return LoginResult(
+            status="otp_required",
+            challenge=challenge,
+            masked_email=mask_email(user.email),
         )
+
+    issued = _create_session(
+        db,
+        user,
+        auth_level="password",
+        ip_address=ip_address,
+        user_agent=user_agent,
     )
-    if method is None:
-        method = MfaMethod(user_id=user.id, method=MfaMethodType.TOTP, encrypted_secret="")
-        db.add(method)
-    elif method.verified_at is not None:
-        raise HTTPException(status.HTTP_409_CONFLICT, "MFA is already configured")
-    method.encrypted_secret = encrypt_mfa_secret(secret)
-    method.verified_at = None
-    method.disabled_at = None
-    db.commit()
-    return pyotp.TOTP(secret).provisioning_uri(name=user.email, issuer_name="LifeLink")
+    return LoginResult(status="authenticated", issued_session=issued)
 
 
-def verify_mfa_and_create_session(
+def _begin_otp_challenge(
     db: DbSession,
-    challenge_token: str,
-    code: str,
+    email_service: EmailService,
+    user: User,
     *,
+    purpose: str,
     ip_address: str | None,
     user_agent: str | None,
-) -> IssuedSession:
-    try:
-        unverified = jwt.decode(
-            challenge_token,
-            settings.JWT_SECRET.get_secret_value(),
-            algorithms=[settings.JWT_ALGORITHM],
-            issuer=settings.JWT_ISSUER,
-            audience=settings.JWT_AUDIENCE,
+) -> OtpChallenge:
+    now = datetime.now(UTC)
+    db.execute(
+        update(OtpChallenge)
+        .where(
+            OtpChallenge.user_id == user.id,
+            OtpChallenge.purpose == purpose,
+            OtpChallenge.used_at.is_(None),
+            OtpChallenge.superseded_at.is_(None),
         )
-        purpose = unverified.get("purpose")
-        if purpose not in {"mfa_setup", "mfa_verify"}:
-            raise jwt.InvalidTokenError("Unexpected token purpose")
-        user_id = uuid.UUID(unverified["sub"])
-        challenge_id = uuid.UUID(unverified["jti"])
-    except (jwt.InvalidTokenError, KeyError, ValueError) as exc:
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid or expired challenge") from exc
-
-    user = db.get(User, user_id)
-    challenge = db.get(AuthChallenge, challenge_id)
-    method = db.scalar(
-        select(MfaMethod).where(
-            MfaMethod.user_id == user_id,
-            MfaMethod.method == MfaMethodType.TOTP,
-            MfaMethod.disabled_at.is_(None),
-        )
+        .values(superseded_at=now)
     )
-    if (
-        user is None
-        or user.status != UserStatus.ACTIVE
-        or method is None
-        or challenge is None
-        or challenge.user_id != user.id
-        or challenge.purpose != purpose
-        or challenge.used_at is not None
-        or challenge.expires_at <= datetime.now(UTC)
-    ):
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid or expired challenge")
 
-    secret = decrypt_mfa_secret(method.encrypted_secret)
-    if not pyotp.TOTP(secret).verify(code, valid_window=1):
-        challenge.failed_attempts += 1
-        if challenge.failed_attempts >= 5:
-            challenge.used_at = datetime.now(UTC)
+    challenge_id = uuid.uuid4()
+    code = generate_otp()
+    challenge = OtpChallenge(
+        id=challenge_id,
+        user_id=user.id,
+        purpose=purpose,
+        code_hash=hash_otp(challenge_id, code),
+        channel="email",
+        max_attempts=settings.OTP_MAX_ATTEMPTS,
+        last_sent_at=now,
+        expires_at=now + timedelta(minutes=settings.OTP_EXPIRY_MINUTES),
+        requested_ip=ip_address,
+    )
+    db.add(challenge)
+    try:
+        email_service.send_login_otp(user.email, code, settings.OTP_EXPIRY_MINUTES)
+    except EmailDeliveryError as exc:
+        db.rollback()
         add_audit_log(
             db,
-            "auth.mfa_failed",
+            "auth.email_delivery_failed",
             actor_user_id=user.id,
             outcome=AuditOutcome.FAILURE,
             ip_address=ip_address,
             user_agent=user_agent,
         )
         db.commit()
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid authentication code")
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "Unable to send verification code",
+        ) from exc
 
-    challenge.used_at = datetime.now(UTC)
-    recovery_codes = None
-    if purpose == "mfa_setup":
-        method.verified_at = datetime.now(UTC)
-        db.execute(delete(MfaRecoveryCode).where(MfaRecoveryCode.user_id == user.id))
-        recovery_codes = [generate_token()[:12] for _ in range(RECOVERY_CODE_COUNT)]
-        db.add_all(
-            [MfaRecoveryCode(user_id=user.id, code_hash=hash_token(code)) for code in recovery_codes]
-        )
-        add_audit_log(db, "auth.mfa_enabled", actor_user_id=user.id)
-    elif method.verified_at is None:
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "MFA setup is incomplete")
-
-    return _create_session(
+    add_audit_log(
         db,
-        user,
+        "auth.email_otp_sent",
+        actor_user_id=user.id,
+        target_type="otp_challenge",
+        target_id=str(challenge.id),
         ip_address=ip_address,
         user_agent=user_agent,
-        recovery_codes=recovery_codes,
     )
+    db.commit()
+    return challenge
 
 
-def use_recovery_code_and_create_session(
+def verify_email_otp(
     db: DbSession,
-    challenge_token: str,
-    recovery_code: str,
+    challenge_id: uuid.UUID,
+    code: str,
     *,
     ip_address: str | None,
     user_agent: str | None,
 ) -> IssuedSession:
-    try:
-        payload = decode_signed_token(challenge_token, "mfa_verify")
-        user_id = uuid.UUID(payload["sub"])
-        challenge_id = uuid.UUID(payload["jti"])
-    except (jwt.InvalidTokenError, KeyError, ValueError) as exc:
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid or expired challenge") from exc
-
     now = datetime.now(UTC)
-    user = db.get(User, user_id)
-    challenge = db.get(AuthChallenge, challenge_id)
-    recovery = db.scalar(
-        select(MfaRecoveryCode).where(
-            MfaRecoveryCode.user_id == user_id,
-            MfaRecoveryCode.code_hash == hash_token(recovery_code),
-            MfaRecoveryCode.used_at.is_(None),
-        )
+    challenge = db.scalar(
+        select(OtpChallenge).where(OtpChallenge.id == challenge_id).with_for_update()
     )
-    if (
-        user is None
-        or user.status != UserStatus.ACTIVE
-        or challenge is None
-        or challenge.user_id != user.id
-        or challenge.purpose != "mfa_verify"
+    invalid = (
+        challenge is None
         or challenge.used_at is not None
+        or challenge.superseded_at is not None
         or challenge.expires_at <= now
-        or recovery is None
-    ):
+        or challenge.failed_attempts >= challenge.max_attempts
+    )
+    if invalid:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "OTP is invalid or expired")
+
+    user = db.get(User, challenge.user_id)
+    if user is None or user.status != UserStatus.ACTIVE:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "OTP is invalid or expired")
+
+    if not verify_otp(challenge.id, code, challenge.code_hash):
+        challenge.failed_attempts += 1
         add_audit_log(
             db,
-            "auth.mfa_recovery_failed",
-            actor_user_id=user_id if user else None,
+            "auth.email_otp_failed",
+            actor_user_id=user.id,
             outcome=AuditOutcome.FAILURE,
+            target_type="otp_challenge",
+            target_id=str(challenge.id),
             ip_address=ip_address,
             user_agent=user_agent,
         )
         db.commit()
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid recovery code")
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "OTP is invalid or expired")
 
     challenge.used_at = now
-    recovery.used_at = now
     add_audit_log(
         db,
-        "auth.mfa_recovery_used",
+        "auth.email_otp_verified",
         actor_user_id=user.id,
+        target_type="otp_challenge",
+        target_id=str(challenge.id),
         ip_address=ip_address,
         user_agent=user_agent,
     )
     return _create_session(
         db,
         user,
+        auth_level="password_otp",
         ip_address=ip_address,
         user_agent=user_agent,
     )
+
+
+def resend_email_otp(
+    db: DbSession,
+    email_service: EmailService,
+    challenge_id: uuid.UUID,
+    *,
+    ip_address: str | None,
+    user_agent: str | None,
+) -> tuple[OtpChallenge, str]:
+    now = datetime.now(UTC)
+    challenge = db.scalar(
+        select(OtpChallenge).where(OtpChallenge.id == challenge_id).with_for_update()
+    )
+    if (
+        challenge is None
+        or challenge.used_at is not None
+        or challenge.superseded_at is not None
+        or challenge.resend_count >= settings.OTP_MAX_RESENDS
+    ):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "OTP cannot be resent")
+
+    elapsed = (now - challenge.last_sent_at).total_seconds()
+    if elapsed < settings.OTP_RESEND_COOLDOWN_SECONDS:
+        retry_after = int(settings.OTP_RESEND_COOLDOWN_SECONDS - elapsed) + 1
+        raise HTTPException(
+            status.HTTP_429_TOO_MANY_REQUESTS,
+            "Please wait before requesting another code",
+            headers={"Retry-After": str(retry_after)},
+        )
+
+    user = db.get(User, challenge.user_id)
+    if user is None or user.status != UserStatus.ACTIVE:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "OTP cannot be resent")
+
+    code = generate_otp()
+    challenge.code_hash = hash_otp(challenge.id, code)
+    challenge.failed_attempts = 0
+    challenge.resend_count += 1
+    challenge.last_sent_at = now
+    challenge.expires_at = now + timedelta(minutes=settings.OTP_EXPIRY_MINUTES)
+    try:
+        email_service.send_login_otp(user.email, code, settings.OTP_EXPIRY_MINUTES)
+    except EmailDeliveryError as exc:
+        db.rollback()
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "Unable to send verification code",
+        ) from exc
+
+    add_audit_log(
+        db,
+        "auth.email_otp_resent",
+        actor_user_id=user.id,
+        target_type="otp_challenge",
+        target_id=str(challenge.id),
+        ip_address=ip_address,
+        user_agent=user_agent,
+    )
+    db.commit()
+    return challenge, mask_email(user.email)
 
 
 def _create_session(
     db: DbSession,
     user: User,
     *,
+    auth_level: str,
     ip_address: str | None,
     user_agent: str | None,
-    recovery_codes: list[str] | None = None,
 ) -> IssuedSession:
     now = datetime.now(UTC)
-    secret = generate_token()
+    raw_token = generate_token()
     session = Session(
         user_id=user.id,
-        refresh_token_hash=hash_token(secret),
+        token_hash=hash_token(raw_token),
+        auth_level=auth_level,
+        device_name=user_agent[:255] if user_agent else None,
         ip_address=ip_address,
         user_agent=user_agent,
-        expires_at=now + timedelta(days=settings.REFRESH_TOKEN_DAYS),
+        expires_at=now + timedelta(hours=settings.SESSION_HOURS),
+        idle_expires_at=now + timedelta(minutes=settings.SESSION_IDLE_MINUTES),
     )
     db.add(session)
     db.flush()
@@ -357,44 +377,10 @@ def _create_session(
         target_id=str(session.id),
         ip_address=ip_address,
         user_agent=user_agent,
+        details={"auth_level": auth_level},
     )
     db.commit()
-    return IssuedSession(
-        access_token=create_access_token(user.id, session.id),
-        refresh_token=f"{session.id}.{secret}",
-        recovery_codes=recovery_codes,
-    )
-
-
-def rotate_refresh_token(db: DbSession, raw_token: str) -> IssuedSession:
-    try:
-        session_id_text, secret = raw_token.split(".", maxsplit=1)
-        session_id = uuid.UUID(session_id_text)
-    except (ValueError, AttributeError) as exc:
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid refresh token") from exc
-
-    session = db.get(Session, session_id)
-    now = datetime.now(UTC)
-    if (
-        session is None
-        or session.revoked_at is not None
-        or session.expires_at <= now
-        or not hmac.compare_digest(session.refresh_token_hash, hash_token(secret))
-    ):
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid refresh token")
-
-    user = db.get(User, session.user_id)
-    if user is None or user.status != UserStatus.ACTIVE:
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid refresh token")
-
-    new_secret = generate_token()
-    session.refresh_token_hash = hash_token(new_secret)
-    session.last_used_at = now
-    db.commit()
-    return IssuedSession(
-        access_token=create_access_token(user.id, session.id),
-        refresh_token=f"{session.id}.{new_secret}",
-    )
+    return IssuedSession(session=session, raw_token=raw_token)
 
 
 def revoke_session(db: DbSession, session: Session, reason: str) -> None:
@@ -413,11 +399,10 @@ def revoke_session(db: DbSession, session: Session, reason: str) -> None:
 
 
 def revoke_all_sessions(db: DbSession, user_id: uuid.UUID, reason: str) -> None:
-    now = datetime.now(UTC)
     db.execute(
         update(Session)
         .where(Session.user_id == user_id, Session.revoked_at.is_(None))
-        .values(revoked_at=now, revocation_reason=reason)
+        .values(revoked_at=datetime.now(UTC), revocation_reason=reason)
     )
     add_audit_log(
         db,
@@ -439,18 +424,13 @@ def change_password(
     if verify_password(new_password, user.password_hash):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "New password must be different")
 
+    now = datetime.now(UTC)
     user.password_hash = hash_password(new_password)
-    user.password_changed_at = datetime.now(UTC)
+    user.password_changed_at = now
     db.execute(
         update(Session)
         .where(Session.user_id == user.id, Session.revoked_at.is_(None))
-        .values(revoked_at=datetime.now(UTC), revocation_reason="password_changed")
-    )
-    add_audit_log(
-        db,
-        "auth.all_sessions_revoked",
-        actor_user_id=user.id,
-        details={"reason": "password_changed"},
+        .values(revoked_at=now, revocation_reason="password_changed")
     )
     add_audit_log(db, "auth.password_changed", actor_user_id=user.id)
     db.commit()
