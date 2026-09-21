@@ -8,6 +8,7 @@ from app.modules.hospitals.router import (
     admin_router as hospitals_admin_router,
     public_router as hospitals_public_router
 )
+from app.modules.invites.router import router as invites_router
 
 app = FastAPI(title=settings.APP_NAME)
 app.add_middleware(
@@ -21,7 +22,7 @@ app.include_router(auth_router, prefix=settings.API_V1_PREFIX)
 app.include_router(locations_router, prefix=settings.API_V1_PREFIX)
 app.include_router(hospitals_admin_router, prefix=settings.API_V1_PREFIX)
 app.include_router(hospitals_public_router, prefix=settings.API_V1_PREFIX)
-
+app.include_router(invites_router, prefix=settings.API_V1_PREFIX)
 @app.get("/health", tags=["system"])
 def health() -> dict[str, str]:
     return {"status": "ok"}
