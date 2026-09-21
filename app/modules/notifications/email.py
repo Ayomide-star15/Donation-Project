@@ -64,3 +64,24 @@ def get_email_service() -> EmailService:
     if settings.EMAIL_BACKEND == "smtp":
         return SmtpEmailService()
     raise RuntimeError(f"Unsupported EMAIL_BACKEND: {settings.EMAIL_BACKEND}")
+
+def send_community_admin_invite(
+    self,
+    recipient: str,
+    first_name: str,
+    community_name: str,
+    inviter_name: str,
+    invite_link: str,
+    expires_in_days: int,
+) -> None:
+    subject = f"You're invited to administer {community_name} on LIFESOURCE"
+    body = (
+        f"Hi {first_name},\n\n"
+        f"{inviter_name} has invited you to become the Community Admin for "
+        f"{community_name} on LIFESOURCE.\n\n"
+        f"Accept your invitation here:\n{invite_link}\n\n"
+        f"This link expires in {expires_in_days} days.\n\n"
+        f"If you weren't expecting this, you can safely ignore this email.\n\n"
+        f"— LIFESOURCE"
+    )
+    self._send(recipient, subject, body)
