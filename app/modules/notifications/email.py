@@ -28,6 +28,15 @@ class EmailService(Protocol):
         expires_in_days: int,
     ) -> None: ...
 
+    def send_member_invite(
+        self,
+        recipient: str,
+        full_name: str,
+        community_name: str,
+        inviter_name: str,
+        invite_link: str,
+        expires_in_days: int,
+    ) -> None: ...
 
 class ConsoleEmailService:
     """Local-only adapter. Production configuration explicitly rejects this backend."""
@@ -64,14 +73,33 @@ class ConsoleEmailService:
             expires_in_days,
         )
 
+    def send_member_invite(
+        self,
+        recipient: str,
+        full_name: str,
+        community_name: str,
+        inviter_name: str,
+        invite_link: str,
+        expires_in_days: int,
+    ) -> None:
+        logger.warning(
+            "DEVELOPMENT EMAIL MEMBER INVITE to %s:\n"
+            "  Name: %s\n"
+            "  Community: %s\n"
+            "  Invited by: %s\n"
+            "  Link: %s\n"
+            "  Expires in %s days",
+            recipient, full_name, community_name, inviter_name,
+            invite_link, expires_in_days,
+        )
 
 class SmtpEmailService:
     def send_login_otp(
         self, recipient: str, code: str, expires_in_minutes: int
     ) -> None:
-        subject = "Your LifeLink verification code"
+        subject = "Your LIFESOURCE verification code"
         body = (
-            f"Your LifeLink verification code is {code}.\n\n"
+            f"Your LIFESOURCE verification code is {code}.\n\n"
             f"It expires in {expires_in_minutes} minutes.\n"
             "If you did not attempt to sign in, secure your account immediately."
         )
@@ -123,6 +151,24 @@ class SmtpEmailService:
         except (OSError, smtplib.SMTPException) as exc:
             raise EmailDeliveryError("Unable to deliver email") from exc
 
+    def send_member_invite(
+        self,
+        recipient: str,
+        full_name: str,
+        community_name: str,
+        inviter_name: str,
+        invite_link: str,
+        expires_in_days: int,
+    ) -> None:
+        subject = f"You're invited to join {community_name} on LIFESOURCE"
+        body = (
+            f"Hi {full_name},\n\n"
+            f"{inviter_name} has invited you to join {community_name} on LIFESOURCE.\n\n"
+            f"Accept your invitation here:\n{invite_link}\n\n"
+            f"This link expires in {expires_in_days} days.\n\n"
+            f"— LIFESOURCE"
+        )
+        self._send(recipient, subject, body)
 
 @lru_cache
 def get_email_service() -> EmailService:

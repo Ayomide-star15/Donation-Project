@@ -10,6 +10,7 @@ from app.modules.hospitals.router import (
 )
 from app.modules.invites.router import router as invites_router
 from app.modules.communities.public_router import router as public_invites_router
+from app.modules.communities.member_router import router as member_router
 
 app = FastAPI(title=settings.APP_NAME)
 app.add_middleware(
@@ -25,6 +26,7 @@ app.include_router(hospitals_admin_router, prefix=settings.API_V1_PREFIX)
 app.include_router(hospitals_public_router, prefix=settings.API_V1_PREFIX)
 app.include_router(invites_router, prefix=settings.API_V1_PREFIX)
 app.include_router(public_invites_router, prefix=settings.API_V1_PREFIX)
+app.include_router(member_router, prefix=settings.API_V1_PREFIX)
 @app.get("/health", tags=["system"])
 def health() -> dict[str, str]:
     return {"status": "ok"}
