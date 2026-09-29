@@ -53,7 +53,6 @@ class MemberListResponse(BaseModel):
 
 
 # ---------- Approve / Reject ----------
-
 class RejectMemberRequest(BaseModel):
     reason: str | None = Field(default=None, max_length=500)
 
@@ -80,7 +79,7 @@ class JoinApplicationRequest(BaseModel):
     full_name: str = Field(min_length=2, max_length=200)
     email: EmailStr
     password: str = Field(min_length=8, max_length=128)
-    phone: str | None = Field(default=None, max_length=32)
+    phone: str = Field(min_length=7, max_length=32)
 
 
 class JoinApplicationResponse(BaseModel):
@@ -89,10 +88,10 @@ class JoinApplicationResponse(BaseModel):
 
 
 # ---------- Public: accept member invite ----------
-
 class MemberInviteAcceptRequest(BaseModel):
     password: str = Field(min_length=8, max_length=128)
-    phone: str | None = Field(default=None, max_length=32)
+    phone: str = Field(min_length=7, max_length=32)
+
 
 
 class MemberInviteAcceptResponse(BaseModel):

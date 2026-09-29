@@ -2,7 +2,6 @@ import logging
 import secrets
 import uuid
 from datetime import UTC, datetime, timedelta
-
 from fastapi import HTTPException, status
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
@@ -51,7 +50,6 @@ def _require_community_admin(db: DbSession, user: User) -> CommunityAdmin:
 # =========================================================
 # GET /community/me
 # =========================================================
-
 def get_my_community(db: DbSession, user: User) -> dict:
     admin_link = _require_community_admin(db, user)
     community = db.get(Community, admin_link.community_id)
@@ -85,7 +83,6 @@ def get_my_community(db: DbSession, user: User) -> dict:
         "pending_count": pending_count,
         "created_at": community.created_at,
     }
-
 
 # =========================================================
 # POST /community/members/invite
