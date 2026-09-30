@@ -16,6 +16,9 @@ class Invite(Base):
     first_name: Mapped[str] = mapped_column(String(100))
     last_name: Mapped[str] = mapped_column(String(100))
     community_name: Mapped[str] = mapped_column(String(200))
+    community_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("communities.id", ondelete="CASCADE"), nullable=True, index=True
+    )
     purpose: Mapped[str] = mapped_column(String(30), default="community_admin")
     status: Mapped[str] = mapped_column(
         String(20), default="pending", server_default="pending", index=True
