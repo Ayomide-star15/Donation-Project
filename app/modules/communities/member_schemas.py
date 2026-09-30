@@ -38,6 +38,7 @@ class MemberResponse(BaseModel):
     user_id: uuid.UUID | None
     full_name: str
     email: EmailStr
+    phone: str | None
     method: str
     status: str
     rejection_reason: str | None
@@ -98,3 +99,16 @@ class MemberInviteAcceptResponse(BaseModel):
     status: str = "accepted"
     user_id: uuid.UUID
     community_id: uuid.UUID
+
+# ---------- Public: view member invite (prefill) ----------
+
+class MemberInviteDetailsResponse(BaseModel):
+    first_name: str
+    last_name: str
+    email: EmailStr
+    community_name: str
+    community_type: str
+    invited_by_name: str
+    expires_at: datetime
+    is_expired: bool
+    is_used: bool

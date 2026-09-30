@@ -9,6 +9,7 @@ from app.modules.communities.member_schemas import (
     JoinLinkPublicPreview,
     MemberInviteAcceptRequest,
     MemberInviteAcceptResponse,
+    MemberInviteDetailsResponse,
 )
 
 
@@ -54,3 +55,7 @@ def accept_member_invite(
     return member_service.accept_member_invite(
         db, token, payload.password, payload.phone
     )
+
+@router.get("/member-invites/{token}", response_model=MemberInviteDetailsResponse)
+def get_member_invite_details(token: str, db: DbSession = Depends(get_db)) -> dict:
+    return member_service.get_member_invite_details(db, token)

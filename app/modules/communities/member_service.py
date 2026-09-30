@@ -46,6 +46,22 @@ def _require_community_admin(db: DbSession, user: User) -> CommunityAdmin:
         )
     return admin_link
 
+def _serialize_member(m: CommunityMember) -> dict:
+    return {
+        "id": m.id,
+        "community_id": m.community_id,
+        "user_id": m.user_id,
+        "full_name": m.full_name,
+        "email": m.email,
+        "phone": m.user.phone if m.user else None,
+        "method": m.method,
+        "status": m.status,
+        "rejection_reason": m.rejection_reason,
+        "joined_at": m.joined_at,
+        "created_at": m.created_at,
+    }
+
+
 
 # =========================================================
 # GET /community/me
@@ -236,19 +252,24 @@ def list_members(
     rows = list(db.scalars(stmt))
     total = db.scalar(count_stmt) or 0
 
-    return {"members": rows, "total": total, "limit": limit, "offset": offset}
+    return {
+        "members": [_serialize_member(m) for m in rows],
+        "total": total,
+        "limit": limit,
+        "offset": offset
+    }
 
 
 # =========================================================
 # GET /community/members/{id}
 # =========================================================
 
-def get_member(db: DbSession, actor: User, member_id: uuid.UUID) -> CommunityMember:
+def get_member(db: DbSession, actor: User, member_id: uuid.UUID) -> dict:
     admin_link = _require_community_admin(db, actor)
     member = db.get(CommunityMember, member_id)
     if member is None or member.community_id != admin_link.community_id:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Member not found")
-    return member
+    return _serialize_member(member)
 
 
 # =========================================================
@@ -297,7 +318,7 @@ def revoke_member(db: DbSession, actor: User, member_id: uuid.UUID) -> None:
 # POST /community/members/{id}/approve
 # =========================================================
 
-def approve_member(db: DbSession, actor: User, member_id: uuid.UUID) -> CommunityMember:
+def approve_member(db: DbSession, actor: User, member_id: uuid.UUID) -> dict:
     admin_link = _require_community_admin(db, actor)
     member = db.get(CommunityMember, member_id)
     if member is None or member.community_id != admin_link.community_id:
@@ -342,7 +363,7 @@ def approve_member(db: DbSession, actor: User, member_id: uuid.UUID) -> Communit
     )
     db.commit()
     db.refresh(member)
-    return member
+    return _serialize_member(member)
 
 
 # =========================================================
@@ -354,7 +375,7 @@ def reject_member(
     actor: User,
     member_id: uuid.UUID,
     reason: str | None = None,
-) -> CommunityMember:
+) -> dict:
     admin_link = _require_community_admin(db, actor)
     member = db.get(CommunityMember, member_id)
     if member is None or member.community_id != admin_link.community_id:
@@ -380,7 +401,7 @@ def reject_member(
     )
     db.commit()
     db.refresh(member)
-    return member
+    return _serialize_member(member)
 
 
 # =========================================================
@@ -505,7 +526,7 @@ def apply_via_join_link(
     full_name: str,
     email: str,
     password: str,
-    phone: str | None,
+    phone: str,
 ) -> None:
     link = _get_join_link_by_code(db, code)
     community = db.get(Community, link.community_id)
@@ -543,7 +564,7 @@ def apply_via_join_link(
             password_hash=hash_password(password),
             first_name=first_name,
             last_name=last_name,
-            phone=(phone or "").strip() or None,
+            phone=phone.strip(),
             status=UserStatus.PENDING,
             email_verified_at=None,
             password_changed_at=now,
@@ -580,7 +601,7 @@ def accept_member_invite(
     db: DbSession,
     raw_token: str,
     password: str,
-    phone: str | None,
+    phone: str,
 ) -> dict:
     invite = db.scalar(
         select(Invite).where(
@@ -619,7 +640,7 @@ def accept_member_invite(
         password_hash=hash_password(password),
         first_name=invite.first_name or "Member",
         last_name=invite.last_name or "",
-        phone=(phone or "").strip() or None,
+        phone=phone.strip(),
         status=UserStatus.ACTIVE,
         email_verified_at=now,
         password_changed_at=now,
@@ -648,4 +669,37 @@ def accept_member_invite(
         "status": "accepted",
         "user_id": user.id,
         "community_id": invite.community_id,
+    }
+
+# =========================================================
+# PUBLIC: view member invite (for prefill)
+# =========================================================
+
+def get_member_invite_details(db: DbSession, raw_token: str) -> dict:
+    invite = db.scalar(
+        select(Invite).where(
+            Invite.token_hash == hash_token(raw_token),
+            Invite.purpose == INVITE_PURPOSE_MEMBER,
+        )
+    )
+    if invite is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Invalid invite link")
+
+    community = db.get(Community, invite.community_id) if invite.community_id else None
+    inviter = db.get(User, invite.invited_by) if invite.invited_by else None
+
+    now = datetime.now(UTC)
+    return {
+        "first_name": invite.first_name,
+        "last_name": invite.last_name,
+        "email": invite.email,
+        "community_name": invite.community_name,
+        "community_type": community.type if community else "other",
+        "invited_by_name": (
+            f"{inviter.first_name} {inviter.last_name}".strip()
+            if inviter else "LIFESOURCE"
+        ),
+        "expires_at": invite.expires_at,
+        "is_expired": invite.expires_at <= now,
+        "is_used": invite.status != "pending",
     }

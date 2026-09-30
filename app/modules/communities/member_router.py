@@ -112,6 +112,7 @@ def _join_link_response(link) -> dict:
         "code": link.code,
         "url": f"{settings.FRONTEND_URL.rstrip('/')}/join/{link.code}",
         "is_active": link.is_active,
+        "expires_at": link.expires_at,
         "created_at": link.created_at,
     }
 

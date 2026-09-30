@@ -1,12 +1,10 @@
 import uuid
 from datetime import datetime
-
 from sqlalchemy import DateTime, ForeignKey, String, UniqueConstraint, func, Text, Boolean
 from sqlalchemy.orm import Mapped, mapped_column, relationship
-
 from app.core.database import Base
 from app.modules.locations.models import Lga, State
-
+from app.modules.users.models import User
 
 class Community(Base):
     __tablename__ = "communities"
@@ -93,6 +91,7 @@ class CommunityMember(Base):
     )
 
     community: Mapped["Community"] = relationship(lazy="joined")
+    user: Mapped["User | None"] = relationship(lazy = "joined", foreign_keys=[user_id])
 
 
 class CommunityJoinLink(Base):
@@ -111,4 +110,3 @@ class CommunityJoinLink(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     
-
