@@ -71,3 +71,16 @@ class SessionResponse(BaseModel):
     last_seen_at: datetime
     expires_at: datetime
     idle_expires_at: datetime | None
+
+class DonorSignupStartRequest(BaseModel):
+    first_name: str = Field(min_length=1, max_length=100)
+    last_name: str = Field(min_length=1, max_length=100)
+    email: EmailStr
+    phone: str = Field(min_length=7, max_length=32)
+    password: str = Field(min_length=8, max_length=128)
+
+
+class DonorSignupStartResponse(BaseModel):
+    status: str = "verification_email_sent"
+    message: str = "Check your email to verify your account"
+    masked_email: str

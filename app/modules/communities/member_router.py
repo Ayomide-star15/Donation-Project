@@ -1,8 +1,6 @@
 import uuid
-
 from fastapi import APIRouter, Depends, Query, status
 from sqlalchemy.orm import Session as DbSession
-
 from app.core.config import settings
 from app.core.database import get_db
 from app.modules.auth.dependencies import AuthContext, get_auth_context

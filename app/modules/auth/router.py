@@ -18,6 +18,8 @@ from app.modules.auth.schemas import (
     OtpVerifyRequest,
     SessionResponse,
     UserResponse,
+    DonorSignupStartRequest,
+    DonorSignupStartResponse
 )
 from app.modules.auth.service import (
     authenticate_password,
@@ -26,6 +28,7 @@ from app.modules.auth.service import (
     revoke_all_sessions,
     revoke_session,
     verify_email_otp,
+    signup_donor_basic
 )
 from app.modules.notifications.email import EmailService, get_email_service
 
@@ -67,6 +70,31 @@ def _delete_session_cookie(response: Response) -> None:
         path="/",
     )
 
+@router.post(
+    "/signup",
+    response_model=DonorSignupStartResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+def signup(
+    payload: DonorSignupStartRequest,
+    request: Request,
+    db: DbSession = Depends(get_db),
+    email_service: EmailService = Depends(get_email_service),
+) -> DonorSignupStartResponse:
+    _validate_browser_origin(request)
+    ip_address, user_agent = _request_metadata(request)
+    result = signup_donor_basic(
+        db,
+        email_service,
+        payload.first_name,
+        payload.last_name,
+        str(payload.email),
+        payload.phone,
+        payload.password,
+        ip_address=ip_address,
+        user_agent=user_agent,
+    )
+    return DonorSignupStartResponse(**result)
 
 @router.post("/login", response_model=LoginResponse)
 def login(
