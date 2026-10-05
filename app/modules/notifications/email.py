@@ -38,6 +38,14 @@ class EmailService(Protocol):
         expires_in_days: int,
     ) -> None: ...
 
+    def send_email_verification_link(
+        self,
+        recipient: str,
+        first_name: str,
+        verify_link: str,
+        expires_in_hours: int,
+    ) -> None: ...
+
 class ConsoleEmailService:
     """Local-only adapter. Production configuration explicitly rejects this backend."""
 
@@ -92,6 +100,24 @@ class ConsoleEmailService:
             recipient, full_name, community_name, inviter_name,
             invite_link, expires_in_days,
         )
+
+    def send_email_verification_link(
+        self,
+        recipient: str,
+        first_name: str,
+        verify_link: str,
+        expires_in_hours: int,
+    ) -> None:
+        logger.warning(
+            "DEVELOPMENT EMAIL VERIFY LINK to %s (%s):\n"
+            "  Link: %s\n"
+            "  Expires in %s hours",
+            recipient,
+            first_name,
+            verify_link,
+            expires_in_hours,
+        )
+
 
 class SmtpEmailService:
     def send_login_otp(
@@ -166,6 +192,25 @@ class SmtpEmailService:
             f"{inviter_name} has invited you to join {community_name} on LIFESOURCE.\n\n"
             f"Accept your invitation here:\n{invite_link}\n\n"
             f"This link expires in {expires_in_days} days.\n\n"
+            f"— LIFESOURCE"
+        )
+        self._send(recipient, subject, body)
+
+    def send_email_verification_link(
+        self,
+        recipient: str,
+        first_name: str,
+        verify_link: str,
+        expires_in_hours: int,
+    ) -> None:
+        subject = "Verify your LIFESOURCE account"
+        body = (
+            f"Hi {first_name},\n\n"
+            f"Welcome to LIFESOURCE. Please verify your email to continue "
+            f"your donor registration.\n\n"
+            f"Verify your email:\n{verify_link}\n\n"
+            f"This link expires in {expires_in_hours} hours.\n\n"
+            f"If you didn't create this account, you can ignore this email.\n\n"
             f"— LIFESOURCE"
         )
         self._send(recipient, subject, body)

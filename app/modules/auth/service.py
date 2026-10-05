@@ -18,9 +18,12 @@ from app.core.security import (
     verify_password,
 )
 from app.modules.audit.service import add_audit_log
-from app.modules.auth.models import OtpChallenge, Session
+from app.modules.auth.models import OtpChallenge, Session, EmailVerificationToken
 from app.modules.notifications.email import EmailDeliveryError, EmailService
 from app.modules.users.models import Role, User, UserRole
+import logging
+
+logger = logging.getLogger(__name__)
 
 MAX_FAILED_LOGINS = 5
 LOCK_MINUTES = 15
@@ -434,3 +437,201 @@ def change_password(
     )
     add_audit_log(db, "auth.password_changed", actor_user_id=user.id)
     db.commit()
+
+
+VERIFICATION_PURPOSE = "signup_verify"
+VERIFICATION_EXPIRY_HOURS = 24
+
+
+def signup_donor_basic(
+    db: DbSession,
+    email_service: EmailService,
+    first_name: str,
+    last_name: str,
+    email: str,
+    phone: str,
+    password: str,
+    *,
+    ip_address: str | None,
+    user_agent: str | None,
+) -> dict:
+    normalized_email = email.strip().lower()
+    normalized_phone = phone.strip()
+
+    # Check email
+    existing = db.scalar(select(User).where(User.email == normalized_email))
+
+    if existing is not None:
+        # Allow re-sending if the user exists but hasn't verified yet
+        if (
+            existing.status == UserStatus.PENDING
+            and existing.email_verified_at is None
+        ):
+            user = existing
+        else:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                "An account with this email already exists",
+            )
+    else:
+        # Check phone uniqueness
+        if db.scalar(select(User.id).where(User.phone == normalized_phone)):
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                "An account with this phone already exists",
+            )
+
+        now = datetime.now(UTC)
+        user = User(
+            email=normalized_email,
+            password_hash=hash_password(password),
+            first_name=first_name.strip(),
+            last_name=last_name.strip(),
+            phone=normalized_phone,
+            status=UserStatus.PENDING,
+            email_verified_at=None,
+            password_changed_at=now,
+        )
+        db.add(user)
+        try:
+            db.flush()
+        except IntegrityError:
+            db.rollback()
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                "An account with this email already exists",
+            )
+
+    # Invalidate any previous unused tokens for this user
+    now = datetime.now(UTC)
+    old_tokens = db.scalars(
+        select(EmailVerificationToken).where(
+            EmailVerificationToken.user_id == user.id,
+            EmailVerificationToken.used_at.is_(None),
+        )
+    ).all()
+    for old in old_tokens:
+        old.used_at = now
+
+    # Generate a new token
+    raw_token = generate_token()
+    token = EmailVerificationToken(
+        user_id=user.id,
+        token_hash=hash_token(raw_token),
+        purpose=VERIFICATION_PURPOSE,
+        expires_at=now + timedelta(hours=VERIFICATION_EXPIRY_HOURS),
+    )
+    db.add(token)
+    db.flush()
+
+    verify_link = (
+        f"{settings.FRONTEND_URL.rstrip('/')}/verify-email?token={raw_token}"
+    )
+
+    # Send email (outside the transaction state, but inside the session)
+    try:
+        email_service.send_email_verification_link(
+            recipient=user.email,
+            first_name=user.first_name,
+            verify_link=verify_link,
+            expires_in_hours=VERIFICATION_EXPIRY_HOURS,
+        )
+    except Exception as exc:
+        logger.exception("SIGNUP EMAIL FAILED: %s", exc)
+        db.rollback()
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "Could not send verification email",
+        )
+
+    add_audit_log(
+        db,
+        "auth.signup_initiated",
+        actor_user_id=user.id,
+        ip_address=ip_address,
+        user_agent=user_agent,
+    )
+    db.commit()
+
+    return {
+        "status": "verification_email_sent",
+        "message": "Check your email to verify your account",
+        "masked_email": mask_email(user.email),
+    }
+
+def verify_email_token(
+    db: DbSession,
+    raw_token: str,
+    *,
+    ip_address: str | None,
+    user_agent: str | None,
+) -> IssuedSession:
+    """
+    Consume an email verification token.
+    - Validates the token (exists, unused, unexpired)
+    - Marks the user's email as verified
+    - Creates a session (user is now logged in)
+    """
+    now = datetime.now(UTC)
+
+    token = db.scalar(
+        select(EmailVerificationToken).where(
+            EmailVerificationToken.token_hash == hash_token(raw_token),
+            EmailVerificationToken.purpose == "signup_verify",
+        )
+    )
+
+    if token is None:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "This verification link is invalid",
+        )
+
+    if token.used_at is not None:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "This verification link has already been used",
+        )
+
+    if token.expires_at <= now:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "This verification link has expired. Please sign up again.",
+        )
+
+    user = db.get(User, token.user_id)
+    if user is None:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "Invalid verification link",
+        )
+
+    # Mark verified
+    if user.email_verified_at is None:
+        user.email_verified_at = now
+
+    # Activate the user — they've proven email ownership
+    if user.status == UserStatus.PENDING:
+        user.status = UserStatus.ACTIVE
+
+    token.used_at = now
+
+    # Burn the token
+    token.used_at = now
+
+    add_audit_log(
+        db,
+        "auth.email_verified",
+        actor_user_id=user.id,
+        ip_address=ip_address,
+        user_agent=user_agent,
+    )
+
+    # _create_session commits internally
+    return _create_session(
+        db,
+        user,
+        auth_level="email_verified",
+        ip_address=ip_address,
+        user_agent=user_agent,
+    )
