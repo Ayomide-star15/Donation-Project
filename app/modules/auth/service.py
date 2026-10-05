@@ -558,3 +558,80 @@ def signup_donor_basic(
         "message": "Check your email to verify your account",
         "masked_email": mask_email(user.email),
     }
+
+def verify_email_token(
+    db: DbSession,
+    raw_token: str,
+    *,
+    ip_address: str | None,
+    user_agent: str | None,
+) -> IssuedSession:
+    """
+    Consume an email verification token.
+    - Validates the token (exists, unused, unexpired)
+    - Marks the user's email as verified
+    - Creates a session (user is now logged in)
+    """
+    now = datetime.now(UTC)
+
+    token = db.scalar(
+        select(EmailVerificationToken).where(
+            EmailVerificationToken.token_hash == hash_token(raw_token),
+            EmailVerificationToken.purpose == "signup_verify",
+        )
+    )
+
+    if token is None:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "This verification link is invalid",
+        )
+
+    if token.used_at is not None:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "This verification link has already been used",
+        )
+
+    if token.expires_at <= now:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "This verification link has expired. Please sign up again.",
+        )
+
+    user = db.get(User, token.user_id)
+    if user is None:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "Invalid verification link",
+        )
+
+    # Mark verified
+    if user.email_verified_at is None:
+        user.email_verified_at = now
+
+    # Activate the user — they've proven email ownership
+    if user.status == UserStatus.PENDING:
+        user.status = UserStatus.ACTIVE
+
+    token.used_at = now
+
+    # Burn the token
+    token.used_at = now
+
+    add_audit_log(
+        db,
+        "auth.email_verified",
+        actor_user_id=user.id,
+        ip_address=ip_address,
+        user_agent=user_agent,
+    )
+
+    # _create_session commits internally
+    return _create_session(
+        db,
+        user,
+        auth_level="email_verified",
+        ip_address=ip_address,
+        user_agent=user_agent,
+    )

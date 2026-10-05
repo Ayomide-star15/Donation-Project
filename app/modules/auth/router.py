@@ -19,7 +19,8 @@ from app.modules.auth.schemas import (
     SessionResponse,
     UserResponse,
     DonorSignupStartRequest,
-    DonorSignupStartResponse
+    DonorSignupStartResponse,
+    VerifyEmailRequest
 )
 from app.modules.auth.service import (
     authenticate_password,
@@ -28,7 +29,8 @@ from app.modules.auth.service import (
     revoke_all_sessions,
     revoke_session,
     verify_email_otp,
-    signup_donor_basic
+    signup_donor_basic,
+    verify_email_token,
 )
 from app.modules.notifications.email import EmailService, get_email_service
 
@@ -95,6 +97,26 @@ def signup(
         user_agent=user_agent,
     )
     return DonorSignupStartResponse(**result)
+
+@router.post("/verify-email", response_model=AuthenticatedResponse)
+def verify_email(
+    payload: VerifyEmailRequest,
+    request: Request,
+    response: Response,
+    db: DbSession = Depends(get_db),
+) -> AuthenticatedResponse:
+    _validate_browser_origin(request)
+    ip_address, user_agent = _request_metadata(request)
+
+    issued = verify_email_token(
+        db,
+        payload.token,
+        ip_address=ip_address,
+        user_agent=user_agent,
+    )
+
+    _set_session_cookie(response, issued.raw_token)
+    return AuthenticatedResponse()
 
 @router.post("/login", response_model=LoginResponse)
 def login(

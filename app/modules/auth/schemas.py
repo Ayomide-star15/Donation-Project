@@ -84,3 +84,6 @@ class DonorSignupStartResponse(BaseModel):
     status: str = "verification_email_sent"
     message: str = "Check your email to verify your account"
     masked_email: str
+
+class VerifyEmailRequest(BaseModel):
+    token: str = Field(min_length=10, max_length=200)
