@@ -21,7 +21,12 @@ from app.modules.audit.service import add_audit_log
 from app.modules.auth.models import OtpChallenge, Session, EmailVerificationToken
 from app.modules.notifications.email import EmailDeliveryError, EmailService
 from app.modules.users.models import Role, User, UserRole
+from app.modules.donors.models import DonorProfile
+from app.modules.donors.schemas import CompleteDonorProfileRequest
+from app.modules.locations.models import Lga, State
 import logging
+
+INELIGIBLE_GENOTYPES = {"SS", "SC"}
 
 logger = logging.getLogger(__name__)
 
@@ -635,3 +640,95 @@ def verify_email_token(
         ip_address=ip_address,
         user_agent=user_agent,
     )
+
+def complete_donor_profile(
+    db: DbSession,
+    user: User,
+    payload: CompleteDonorProfileRequest,
+) -> DonorProfile:
+    # ---- Rule 1: email must be verified ----
+    if user.email_verified_at is None:
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            "Please verify your email before completing your profile",
+        )
+
+    # ---- Rule 2: cannot register twice ----
+    if db.get(DonorProfile, user.id) is not None:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "You already have a donor profile",
+        )
+
+    # ---- Rule 3: cannot be a community member (roles are exclusive) ----
+    from app.modules.communities.models import CommunityMember
+    existing_member = db.scalar(
+        select(CommunityMember.id).where(
+            CommunityMember.user_id == user.id,
+            CommunityMember.status.in_(["approved", "pending"]),
+        )
+    )
+    if existing_member is not None:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "This account is registered as a community member. "
+            "A user cannot be both a member and a donor.",
+        )
+
+    # ---- Rule 4: state must exist ----
+    state = db.get(State, payload.state_id)
+    if state is None:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            "Unknown state",
+        )
+
+    # ---- Rule 5: LGA must belong to that state ----
+    lga = db.get(Lga, payload.lga_id)
+    if lga is None:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            "Unknown LGA",
+        )
+    if lga.state_id != state.id:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            f"LGA '{lga.name}' does not belong to {state.name}",
+        )
+
+    # ---- Rule 6: genotype eligibility (raw genotype never stored) ----
+    is_eligible = payload.genotype.value not in INELIGIBLE_GENOTYPES
+
+    # ---- Create the donor profile ----
+    profile = DonorProfile(
+        profile_id=user.id,
+        blood_type=payload.blood_type.value,
+        is_genotype_eligible=is_eligible,
+        state_id=state.id,
+        lga_id=lga.id,
+        latitude=payload.latitude,
+        longitude=payload.longitude,
+        availability=True,
+    )
+    db.add(profile)
+
+    # ---- Activate user if still pending ----
+    if user.status == UserStatus.PENDING:
+        user.status = UserStatus.ACTIVE
+
+    add_audit_log(
+        db,
+        "donor.profile_created",
+        actor_user_id=user.id,
+        target_type="donor_profile",
+        target_id=str(user.id),
+        details={
+            "blood_type": payload.blood_type.value,
+            "is_genotype_eligible": is_eligible,
+            "state": state.name,
+            "lga": lga.name,
+        },
+    )
+    db.commit()
+    db.refresh(profile)
+    return profile
