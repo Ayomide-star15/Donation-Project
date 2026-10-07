@@ -217,3 +217,4 @@ def _assert_usable(invite: Invite) -> None:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "This invite was declined")
     if invite.expires_at <= now:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "This invite has expired")
+

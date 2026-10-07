@@ -703,3 +703,78 @@ def get_member_invite_details(db: DbSession, raw_token: str) -> dict:
         "is_expired": invite.expires_at <= now,
         "is_used": invite.status != "pending",
     }
+
+def get_my_profile(db: DbSession, user: User) -> dict:
+    """
+    Full member profile in one payload:
+    - account info (from users)
+    - community membership + admin (if any)
+    """
+    # ---------- Account info ----------
+    user_info = {
+        "id": user.id,
+        "first_name": user.first_name,
+        "last_name": user.last_name,
+        "full_name": f"{user.first_name} {user.last_name}".strip(),
+        "email": user.email,
+        "phone": user.phone,
+        "status": (
+            user.status.value
+            if hasattr(user.status, "value")
+            else user.status
+        ),
+        "email_verified_at": user.email_verified_at,
+        "created_at": user.created_at,
+    }
+
+    # ---------- Community info (optional) ----------
+    member = db.scalar(
+        select(CommunityMember).where(
+            CommunityMember.user_id == user.id,
+            CommunityMember.status == "approved",
+        )
+    )
+
+    community_info = None
+
+    if member is not None:
+        community = db.get(Community, member.community_id)
+
+        if community is not None:
+            # Community admin (optional)
+            admin_link = db.scalar(
+                select(CommunityAdmin).where(
+                    CommunityAdmin.community_id == community.id,
+                    CommunityAdmin.status == "active",
+                )
+            )
+
+            community_admin = None
+            if admin_link is not None:
+                admin_user = db.get(User, admin_link.user_id)
+                if admin_user is not None:
+                    community_admin = {
+                        "id": admin_user.id,
+                        "full_name": (
+                            f"{admin_user.first_name} {admin_user.last_name}".strip()
+                        ),
+                        "email": admin_user.email,
+                        "phone": admin_user.phone,
+                    }
+
+            community_info = {
+                "community_id": community.id,
+                "community_name": community.name,
+                "community_type": community.type,
+                "state_name": community.state.name,
+                "lga_name": community.lga.name,
+                "community_status": community.status,
+                "member_status": member.status,
+                "joined_at": member.joined_at,
+                "community_admin": community_admin,
+            }
+
+    return {
+        "user": user_info,
+        "community": community_info,
+    }
