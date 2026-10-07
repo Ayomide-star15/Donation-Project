@@ -112,3 +112,38 @@ class MemberInviteDetailsResponse(BaseModel):
     expires_at: datetime
     is_expired: bool
     is_used: bool
+
+class MyCommunityAdminInfo(BaseModel):
+    id: uuid.UUID
+    full_name: str
+    email: EmailStr
+    phone: str | None
+
+
+class MyCommunityInfo(BaseModel):
+    community_id: uuid.UUID
+    community_name: str
+    community_type: str
+    state_name: str
+    lga_name: str
+    community_status: str
+    member_status: str
+    joined_at: datetime | None
+    community_admin: MyCommunityAdminInfo | None
+
+
+class MyUserInfo(BaseModel):
+    id: uuid.UUID
+    first_name: str
+    last_name: str
+    full_name: str
+    email: EmailStr
+    phone: str | None
+    status: str
+    email_verified_at: datetime | None
+    created_at: datetime
+
+
+class MyProfileResponse(BaseModel):
+    user: MyUserInfo
+    community: MyCommunityInfo | None
