@@ -24,6 +24,7 @@ from app.modules.auth.schemas import (
 )
 from app.modules.auth.service import (
     authenticate_password,
+    build_session_payload,
     change_password,
     resend_email_otp,
     revoke_all_sessions,
@@ -232,8 +233,11 @@ def update_password(
 
 @router.get("/session", response_model=UserResponse)
 @router.get("/me", response_model=UserResponse, include_in_schema=False)
-def current_session(context: AuthContext = Depends(get_auth_context)) -> UserResponse:
-    return UserResponse.model_validate(context.user)
+def current_session(
+    context: AuthContext = Depends(get_auth_context),
+    db: DbSession = Depends(get_db),
+) -> dict:
+    return build_session_payload(db, context.user)
 
 
 @router.get("/sessions", response_model=list[SessionResponse])

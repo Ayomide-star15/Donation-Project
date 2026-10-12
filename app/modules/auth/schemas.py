@@ -47,7 +47,7 @@ class ChangePasswordRequest(BaseModel):
 
 class UserResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
-
+#------ Identity -----
     id: uuid.UUID
     user_code: str
     email: EmailStr
@@ -58,6 +58,16 @@ class UserResponse(BaseModel):
     last_login_at: datetime | None
     created_at: datetime
 
+#----- Role ----
+    roles: list[str] = []
+    primary_role: str = "unassigned"
+    is_super_admin: bool = False
+    is_community_admin: bool = False
+    is_donor: bool = False
+    is_member: bool = False
+
+ # ---- Frontend routing hint ----
+    next_step: str = "dashboard"
 
 class SessionResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)

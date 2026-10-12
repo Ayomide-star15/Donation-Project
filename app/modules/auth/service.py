@@ -5,7 +5,7 @@ from datetime import UTC, datetime, timedelta
 from fastapi import HTTPException, status
 from sqlalchemy import select, update
 from sqlalchemy.orm import Session as DbSession
-
+from sqlalchemy.exc import IntegrityError
 from app.core.config import settings
 from app.core.enums import AuditOutcome, UserStatus
 from app.core.security import (
@@ -23,6 +23,7 @@ from app.modules.notifications.email import EmailDeliveryError, EmailService
 from app.modules.users.models import Role, User, UserRole
 from app.modules.donors.models import DonorProfile
 from app.modules.donors.schemas import CompleteDonorProfileRequest
+from app.modules.communities.models import CommunityMember
 from app.modules.locations.models import Lga, State
 import logging
 
@@ -732,3 +733,76 @@ def complete_donor_profile(
     db.commit()
     db.refresh(profile)
     return profile
+
+def build_session_payload(db: DbSession, user: User) -> dict:
+    """
+    Assemble the full session response: identity + roles + routing hint.
+    The frontend uses this ONE response to decide where to route the user.
+    """
+
+    # ---- 1. Roles from user_roles ----
+    roles = list(
+        db.scalars(
+            select(Role.name)
+            .join(UserRole, UserRole.role_id == Role.id)
+            .where(UserRole.user_id == user.id)
+        )
+    )
+
+    # ---- 2. Is this user a donor? ----
+    is_donor = db.scalar(
+        select(DonorProfile.profile_id).where(
+            DonorProfile.profile_id == user.id
+        )
+    ) is not None
+
+    # ---- 3. Is this user an active community member? ----
+    is_member = db.scalar(
+        select(CommunityMember.id).where(
+            CommunityMember.user_id == user.id,
+            CommunityMember.status == "approved",
+        )
+    ) is not None
+
+    # ---- 4. Compute primary role (highest priority wins) ----
+    if "super_admin" in roles:
+        primary_role = "super_admin"
+    elif "community_admin" in roles:
+        primary_role = "community_admin"
+    elif is_member:
+        primary_role = "member"
+    elif is_donor:
+        primary_role = "donor"
+    else:
+        primary_role = "unassigned"
+
+    # ---- 5. What should the frontend show next? ----
+    if user.email_verified_at is None:
+        next_step = "verify_email"
+    elif primary_role == "unassigned":
+        next_step = "complete_profile"
+    else:
+        next_step = "dashboard"
+
+    return {
+        "id": user.id,
+        "user_code": user.user_code,
+        "email": user.email,
+        "first_name": user.first_name,
+        "last_name": user.last_name,
+        "status": (
+            user.status.value
+            if hasattr(user.status, "value")
+            else user.status
+        ),
+        "email_verified_at": user.email_verified_at,
+        "last_login_at": user.last_login_at,
+        "created_at": user.created_at,
+        "roles": roles,
+        "primary_role": primary_role,
+        "is_super_admin": "super_admin" in roles,
+        "is_community_admin": "community_admin" in roles,
+        "is_donor": is_donor,
+        "is_member": is_member,
+        "next_step": next_step,
+    }
