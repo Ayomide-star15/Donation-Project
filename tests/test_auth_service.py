@@ -41,7 +41,7 @@ def create_super_admin(db: DbSession) -> User:
     user = User(
         email="admin@example.com",
         password_hash=hash_password("a-secure-admin-password"),
-        first_name="LifeLink",
+        first_name="LIFESOURCE",
         last_name="Admin",
         status=UserStatus.ACTIVE,
         email_verified_at=datetime.now(UTC),
