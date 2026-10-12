@@ -12,7 +12,7 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    APP_NAME: str = "LifeLink API"
+    APP_NAME: str = "LIFESOURCE API"
     ENVIRONMENT: str = "development"
     API_V1_PREFIX: str = "/api/v1"
     DATABASE_URL: str
@@ -30,13 +30,13 @@ class Settings(BaseSettings):
 
     FRONTEND_URL: str = "http://localhost:3000"
     API_PUBLIC_URL: str = "http://127.0.0.1:8000"
-    SESSION_COOKIE_NAME: str = "lifelink_session"
+    SESSION_COOKIE_NAME: str = "lifesource_session"
     COOKIE_SECURE: bool = False
     COOKIE_DOMAIN: str | None = None
-
+    BREVO_API_KEY: SecretStr | None = None
     EMAIL_BACKEND: str = "console"
-    EMAIL_FROM_ADDRESS: str = "no-reply@lifelink.local"
-    EMAIL_FROM_NAME: str = "LifeLink"
+    EMAIL_FROM_ADDRESS: str = "lifesourceteam09@gmail.com"
+    EMAIL_FROM_NAME: str = "LIFESOURCE"
     SMTP_HOST: str | None = None
     SMTP_PORT: int = 1025
     SMTP_USERNAME: str | None = None
@@ -79,8 +79,8 @@ class Settings(BaseSettings):
         if self.ENVIRONMENT.lower() == "production":
             if not self.COOKIE_SECURE:
                 raise ValueError("COOKIE_SECURE must be true in production")
-            if self.EMAIL_BACKEND == "console":
-                raise ValueError("Console email delivery is forbidden in production")
+            if self.EMAIL_BACKEND == "brevo" and not self.BREVO_API_KEY:
+                raise ValueError("BREVO_API_KEY is required when using Brevo email backend in production")
         return self
 
 

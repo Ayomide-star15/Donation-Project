@@ -1,8 +1,10 @@
 import logging
 import smtplib
+import httpx
 from email.message import EmailMessage
 from functools import lru_cache
 from typing import Protocol
+
 
 from app.core.config import settings
 
@@ -215,10 +217,125 @@ class SmtpEmailService:
         )
         self._send(recipient, subject, body)
 
+class BrevoEmailService:
+    """Sends transactional email via Brevo's HTTP API (works on Render)."""
+
+    BASE_URL = "https://api.brevo.com/v3/smtp/email"
+
+    def _send(
+        self,
+        recipient: str,
+        recipient_name: str,
+        subject: str,
+        html: str,
+    ) -> None:
+        if not settings.BREVO_API_KEY:
+            raise EmailDeliveryError("BREVO_API_KEY is not configured")
+
+        headers = {
+            "api-key": settings.BREVO_API_KEY.get_secret_value(),
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        }
+        payload = {
+            "sender": {
+                "name": settings.EMAIL_FROM_NAME,
+                "email": settings.EMAIL_FROM_ADDRESS,
+            },
+            "to": [{"email": recipient, "name": recipient_name or recipient}],
+            "subject": subject,
+            "htmlContent": html,
+        }
+
+        try:
+            response = httpx.post(
+                self.BASE_URL,
+                json=payload,
+                headers=headers,
+                timeout=10,
+            )
+            response.raise_for_status()
+        except httpx.HTTPError as exc:
+            logger.exception("BREVO SEND FAILED to %s: %s", recipient, exc)
+            raise EmailDeliveryError("Unable to deliver email via Brevo") from exc
+
+    def send_login_otp(
+        self, recipient: str, code: str, expires_in_minutes: int
+    ) -> None:
+        subject = "Your LIFESOURCE verification code"
+        html = f"""
+        <p>Your verification code is:</p>
+        <h2 style="font-size: 32px; letter-spacing: 4px;">{code}</h2>
+        <p>It expires in {expires_in_minutes} minutes.</p>
+        <p>If you didn't try to sign in, secure your account immediately.</p>
+        """
+        self._send(recipient, recipient, subject, html)
+
+    def send_community_admin_invite(
+        self,
+        recipient: str,
+        first_name: str,
+        community_name: str,
+        inviter_name: str,
+        invite_link: str,
+        expires_in_days: int,
+    ) -> None:
+        subject = f"You're invited to administer {community_name} on LIFESOURCE"
+        html = f"""
+        <p>Hi {first_name},</p>
+        <p>{inviter_name} has invited you to become the Community Admin
+        for <b>{community_name}</b>.</p>
+        <p><a href="{invite_link}">Accept invitation</a></p>
+        <p>This link expires in {expires_in_days} days.</p>
+        <p>— LIFESOURCE</p>
+        """
+        self._send(recipient, first_name, subject, html)
+
+    def send_member_invite(
+        self,
+        recipient: str,
+        full_name: str,
+        community_name: str,
+        inviter_name: str,
+        invite_link: str,
+        expires_in_days: int,
+    ) -> None:
+        subject = f"You're invited to join {community_name} on LIFESOURCE"
+        html = f"""
+        <p>Hi {full_name},</p>
+        <p>{inviter_name} has invited you to join <b>{community_name}</b>.</p>
+        <p><a href="{invite_link}">Accept invitation</a></p>
+        <p>This link expires in {expires_in_days} days.</p>
+        <p>— LIFESOURCE</p>
+        """
+        self._send(recipient, full_name, subject, html)
+
+    def send_email_verification_link(
+        self,
+        recipient: str,
+        first_name: str,
+        verify_link: str,
+        expires_in_hours: int,
+    ) -> None:
+        subject = "Verify your LIFESOURCE account"
+        html = f"""
+        <p>Hi {first_name},</p>
+        <p>Welcome to LIFESOURCE. Please verify your email to continue your
+        donor registration.</p>
+        <p><a href="{verify_link}">Verify my email</a></p>
+        <p>Or copy this link into your browser:<br>{verify_link}</p>
+        <p>This link expires in {expires_in_hours} hours.</p>
+        <p>If you didn't create this account, ignore this email.</p>
+        <p>— LIFESOURCE</p>
+        """
+        self._send(recipient, first_name, subject, html)
+
 @lru_cache
 def get_email_service() -> EmailService:
     if settings.EMAIL_BACKEND == "console":
         return ConsoleEmailService()
     if settings.EMAIL_BACKEND == "smtp":
         return SmtpEmailService()
+    if settings.EMAIL_BACKEND == "brevo":
+        return BrevoEmailService()
     raise RuntimeError(f"Unsupported EMAIL_BACKEND: {settings.EMAIL_BACKEND}")
