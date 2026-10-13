@@ -6,7 +6,7 @@ from datetime import UTC, datetime, timedelta
 from fastapi import HTTPException, status
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session as DbSession
-
+from app.modules.donors.compatibility import recipient_types_donor_can_help
 from app.modules.audit.service import add_audit_log
 from app.modules.communities.models import CommunityMember
 from app.modules.hospitals.models import Hospital
@@ -17,13 +17,14 @@ from app.modules.requests.models import (
 from app.modules.requests.schemas import CreateRequestPayload
 from app.modules.users.models import User
 from app.modules.donors.models import DonorProfile
+from app.modules.locations.models import Lga, State
 
 logger = logging.getLogger(__name__)
 
 REQUEST_COOLDOWN_HOURS = 72
 REQUEST_EXPIRY_HOURS = 72
 ACCEPTANCE_EXPIRY_HOURS = 24
-DONOR_ACCEPTANCE_COOLDOWN_DAYS = 90
+DONOR_COOLDOWN_DAYS = 90
 
 
 def _next_reference_code(db: DbSession) -> str:
@@ -217,7 +218,6 @@ def accept_request(
         )
 
     # ---- Rule 7: blood type compatibility ----
-    from app.modules.donors.compatibility import recipient_types_donor_can_help
     if request.blood_type_needed not in recipient_types_donor_can_help(donor.blood_type):
         raise HTTPException(
             status.HTTP_400_BAD_REQUEST,
@@ -255,6 +255,7 @@ def accept_request(
     acceptance = DonorAcceptance(
         request_id=request.id,
         donor_id=actor.id,
+        verification_code=code,
         verification_code_hash=_hash_code(code),
         status="accepted",
         expires_at=now + timedelta(hours=ACCEPTANCE_EXPIRY_HOURS),
@@ -511,3 +512,180 @@ def confirm_donation(
             else f"{request.donors_needed - request.confirmed_count} more donor(s) needed."
         ),
     }
+
+# =========================================================
+# 1. Donor: list my acceptances
+# =========================================================
+
+def list_my_acceptances(db: DbSession, actor: User) -> dict:
+    """Return the donor's acceptances, newest first."""
+    rows = list(
+        db.scalars(
+            select(DonorAcceptance)
+            .where(DonorAcceptance.donor_id == actor.id)
+            .order_by(DonorAcceptance.accepted_at.desc())
+        )
+    )
+
+    items = []
+    for a in rows:
+        req = db.get(BloodRequest, a.request_id)
+        if req is None:
+            continue
+
+        # Only return the code if the acceptance is still active
+        code = a.verification_code if a.status == "accepted" else None
+
+        items.append({
+            "id": a.id,
+            "request_id": a.request_id,
+            "reference_code": req.reference_code,
+            "blood_type_needed": req.blood_type_needed,
+            "urgency": req.urgency,
+            "status": a.status,
+            "verification_code": code,
+            "accepted_at": a.accepted_at,
+            "expires_at": a.expires_at,
+            "confirmed_at": a.confirmed_at,
+            "hospital": {
+                "id": req.hospital.id,
+                "name": req.hospital.name,
+                "address": req.hospital.address,
+                "lga_name": req.hospital.lga.name,
+                "state_name": req.hospital.state.name,
+                "phone": req.hospital.phone,
+            },
+        })
+
+    return {"acceptances": items, "total": len(items)}
+
+
+# =========================================================
+# 2. Donor: cancel my acceptance
+# =========================================================
+
+def cancel_acceptance(db: DbSession, actor: User, acceptance_id: uuid.UUID) -> dict:
+    now = datetime.now(UTC)
+
+    acceptance = db.scalar(
+        select(DonorAcceptance)
+        .where(DonorAcceptance.id == acceptance_id)
+        .with_for_update()
+    )
+    if acceptance is None:
+        raise HTTPException(404, "Acceptance not found")
+
+    if acceptance.donor_id != actor.id:
+        raise HTTPException(403, "You can only cancel your own acceptances")
+
+    if acceptance.status != "accepted":
+        raise HTTPException(400, f"Cannot cancel a {acceptance.status} acceptance")
+
+    # Lock the request too
+    request = db.scalar(
+        select(BloodRequest)
+        .where(BloodRequest.id == acceptance.request_id)
+        .with_for_update()
+    )
+
+    acceptance.status = "cancelled"
+    acceptance.cancelled_at = now
+
+    if request is not None:
+        request.accepted_count = max(0, request.accepted_count - 1)
+
+    add_audit_log(
+        db,
+        "acceptance.cancelled",
+        actor_user_id=actor.id,
+        target_type="acceptance",
+        target_id=str(acceptance.id),
+    )
+    db.commit()
+
+    return {"status": "cancelled", "message": "Your acceptance has been cancelled."}
+
+
+# =========================================================
+# 3. Requester: cancel my request
+# =========================================================
+
+def cancel_request(db: DbSession, actor: User, request_id: uuid.UUID) -> None:
+    now = datetime.now(UTC)
+
+    request = db.scalar(
+        select(BloodRequest)
+        .where(BloodRequest.id == request_id)
+        .with_for_update()
+    )
+    if request is None:
+        raise HTTPException(404, "Request not found")
+
+    if request.requester_id != actor.id:
+        raise HTTPException(403, "You can only cancel your own requests")
+
+    if request.status not in ("open", "partial"):
+        raise HTTPException(400, f"Cannot cancel a {request.status} request")
+
+    request.status = "cancelled"
+    request.closed_at = now
+
+    # Cancel all pending acceptances
+    pending = db.scalars(
+        select(DonorAcceptance).where(
+            DonorAcceptance.request_id == request_id,
+            DonorAcceptance.status == "accepted",
+        )
+    ).all()
+    for p in pending:
+        p.status = "cancelled"
+        p.cancelled_at = now
+
+    add_audit_log(
+        db,
+        "request.cancelled",
+        actor_user_id=actor.id,
+        target_type="blood_request",
+        target_id=str(request_id),
+        details={"reference_code": request.reference_code},
+    )
+    db.commit()
+
+
+# =========================================================
+# 4. Donor: update my profile
+# =========================================================
+
+def update_donor_profile(
+    db: DbSession,
+    actor: User,
+    payload: "DonorUpdateRequest",
+) -> dict:
+    from app.modules.donors.service import get_donor_profile
+
+    profile = db.get(DonorProfile, actor.id)
+    if profile is None:
+        raise HTTPException(404, "You are not registered as a donor")
+
+    updates = payload.model_dump(exclude_unset=True)
+
+    # Validate location if either state_id or lga_id is being changed
+    if "state_id" in updates or "lga_id" in updates:
+        new_state_id = updates.get("state_id", profile.state_id)
+        new_lga_id = updates.get("lga_id", profile.lga_id)
+
+        state = db.get(State, new_state_id)
+        if state is None:
+            raise HTTPException(422, "Unknown state")
+
+        lga = db.get(Lga, new_lga_id)
+        if lga is None or lga.state_id != state.id:
+            raise HTTPException(422, f"LGA does not belong to {state.name}")
+
+    for key, value in updates.items():
+        setattr(profile, key, value)
+
+    db.commit()
+    db.refresh(profile)
+
+    return get_donor_profile(db, actor)

@@ -155,3 +155,29 @@ class ConfirmDonationResponse(BaseModel):
     donors_needed: int
     request_status: str
     message: str
+
+
+class MyAcceptanceItem(BaseModel):
+    id: uuid.UUID
+    request_id: uuid.UUID
+    reference_code: str
+    blood_type_needed: str
+    urgency: str
+    status: str
+    verification_code: str | None          # only for active acceptances
+    accepted_at: datetime
+    expires_at: datetime
+    confirmed_at: datetime | None
+    hospital: dict
+
+
+class MyAcceptancesResponse(BaseModel):
+    acceptances: list[MyAcceptanceItem]
+    total: int
+
+
+class CancelAcceptanceResponse(BaseModel):
+    status: str = "cancelled"
+    message: str
+
+

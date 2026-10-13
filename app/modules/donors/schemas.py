@@ -96,3 +96,10 @@ class DonorFeedItem(BaseModel):
 class DonorFeedResponse(BaseModel):
     requests: list[DonorFeedItem]
     total: int
+
+class DonorUpdateRequest(BaseModel):
+    availability: bool | None = None
+    state_id: uuid.UUID | None = None
+    lga_id: uuid.UUID | None = None
+    latitude: float | None = Field(default=None, ge=-90, le=90)
+    longitude: float | None = Field(default=None, ge=-180, le=180)
