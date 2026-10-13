@@ -97,3 +97,61 @@ class AcceptRequestResponse(BaseModel):
     request: AcceptRequestInfo
     hospital: AcceptHospitalInfo
     message: str = "Show this code at the hospital when you donate."
+
+class MyRequestItem(BaseModel):
+    id: uuid.UUID
+    reference_code: str
+    blood_type_needed: str
+    donors_needed: int
+    accepted_count: int
+    confirmed_count: int
+    donors_left: int
+    urgency: str
+    status: str
+    notes: str | None
+    expires_at: datetime
+    created_at: datetime
+    closed_at: datetime | None
+    hospital: dict
+
+
+class MyRequestsListResponse(BaseModel):
+    requests: list[MyRequestItem]
+    total: int
+    limit: int
+    offset: int
+
+class AcceptanceSummary(BaseModel):
+    id: uuid.UUID
+    status: str
+    accepted_at: datetime
+    confirmed_at: datetime | None
+
+
+class RequestDetailResponse(BaseModel):
+    id: uuid.UUID
+    reference_code: str
+    blood_type_needed: str
+    donors_needed: int
+    accepted_count: int
+    confirmed_count: int
+    donors_left: int
+    urgency: str
+    status: str
+    notes: str | None
+    expires_at: datetime
+    created_at: datetime
+    closed_at: datetime | None
+    hospital: dict
+    acceptances: list[AcceptanceSummary]
+
+class ConfirmDonationRequest(BaseModel):
+    code: str = Field(pattern=r"^\d{6}$")
+
+
+class ConfirmDonationResponse(BaseModel):
+    status: str
+    confirmed_count: int
+    donors_needed: int
+    request_status: str
+    message: str

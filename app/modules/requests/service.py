@@ -302,3 +302,212 @@ def accept_request(
         },
         "message": "Show this code at the hospital when you donate.",
     }
+
+def list_my_requests(
+    db: DbSession,
+    actor: User,
+    *,
+    status_filter: str | None = None,
+    limit: int = 50,
+    offset: int = 0,
+) -> dict:
+    stmt = select(BloodRequest).where(BloodRequest.requester_id == actor.id)
+    count_stmt = select(func.count(BloodRequest.id)).where(
+        BloodRequest.requester_id == actor.id
+    )
+
+    if status_filter:
+        stmt = stmt.where(BloodRequest.status == status_filter)
+        count_stmt = count_stmt.where(BloodRequest.status == status_filter)
+
+    stmt = stmt.order_by(BloodRequest.created_at.desc()).limit(limit).offset(offset)
+
+    rows = list(db.scalars(stmt))
+    total = db.scalar(count_stmt) or 0
+
+    requests = []
+    for req in rows:
+        requests.append({
+            "id": req.id,
+            "reference_code": req.reference_code,
+            "blood_type_needed": req.blood_type_needed,
+            "donors_needed": req.donors_needed,
+            "accepted_count": req.accepted_count,
+            "confirmed_count": req.confirmed_count,
+            "donors_left": req.donors_needed - req.accepted_count,
+            "urgency": req.urgency,
+            "status": req.status,
+            "notes": req.notes,
+            "expires_at": req.expires_at,
+            "created_at": req.created_at,
+            "closed_at": req.closed_at,
+            "hospital": {
+                "id": req.hospital.id,
+                "name": req.hospital.name,
+                "address": req.hospital.address,
+                "lga_name": req.hospital.lga.name,
+                "state_name": req.hospital.state.name,
+                "phone": req.hospital.phone,
+            },
+        })
+
+    return {"requests": requests, "total": total, "limit": limit, "offset": offset}
+
+def get_request_detail(db: DbSession, actor: User, request_id: uuid.UUID) -> dict:
+    request = db.get(BloodRequest, request_id)
+    if request is None:
+        raise HTTPException(404, "Request not found")
+
+    # Only the requester can see detail (for v1)
+    if request.requester_id != actor.id:
+        raise HTTPException(403, "You can only view your own requests")
+
+    acceptances = list(
+        db.scalars(
+            select(DonorAcceptance)
+            .where(DonorAcceptance.request_id == request_id)
+            .order_by(DonorAcceptance.accepted_at.desc())
+        )
+    )
+
+    return {
+        "id": request.id,
+        "reference_code": request.reference_code,
+        "blood_type_needed": request.blood_type_needed,
+        "donors_needed": request.donors_needed,
+        "accepted_count": request.accepted_count,
+        "confirmed_count": request.confirmed_count,
+        "donors_left": request.donors_needed - request.accepted_count,
+        "urgency": request.urgency,
+        "status": request.status,
+        "notes": request.notes,
+        "expires_at": request.expires_at,
+        "created_at": request.created_at,
+        "closed_at": request.closed_at,
+        "hospital": {
+            "id": request.hospital.id,
+            "name": request.hospital.name,
+            "address": request.hospital.address,
+            "lga_name": request.hospital.lga.name,
+            "state_name": request.hospital.state.name,
+            "phone": request.hospital.phone,
+        },
+        "acceptances": [
+            {
+                "id": a.id,
+                "status": a.status,
+                "accepted_at": a.accepted_at,
+                "confirmed_at": a.confirmed_at,
+            }
+            for a in acceptances
+        ],
+    }
+
+def confirm_donation(
+    db: DbSession,
+    actor: User,
+    request_id: uuid.UUID,
+    code: str,
+) -> dict:
+    now = datetime.now(UTC)
+
+    # Lock the request
+    request = db.scalar(
+        select(BloodRequest)
+        .where(BloodRequest.id == request_id)
+        .with_for_update()
+    )
+    if request is None:
+        raise HTTPException(404, "Request not found")
+
+    if request.requester_id != actor.id:
+        raise HTTPException(403, "Only the requester can confirm donations")
+
+    if request.status not in ("open", "partial"):
+        raise HTTPException(400, "This request is already closed")
+
+    # Find the matching acceptance
+    code_hash = hashlib.sha256(code.encode("utf-8")).hexdigest()
+    acceptance = db.scalar(
+        select(DonorAcceptance)
+        .where(
+            DonorAcceptance.request_id == request_id,
+            DonorAcceptance.verification_code_hash == code_hash,
+        )
+        .with_for_update()
+    )
+
+    if acceptance is None:
+        add_audit_log(
+            db,
+            "acceptance.confirm_failed",
+            actor_user_id=actor.id,
+            target_type="blood_request",
+            target_id=str(request_id),
+            details={"reason": "invalid_code"},
+        )
+        db.commit()
+        raise HTTPException(400, "Invalid verification code")
+
+    if acceptance.status == "confirmed":
+        raise HTTPException(400, "This code has already been used")
+
+    if acceptance.status != "accepted":
+        raise HTTPException(400, "This acceptance is no longer valid")
+
+    if acceptance.expires_at <= now:
+        raise HTTPException(400, "This acceptance has expired")
+
+    # Mark confirmed
+    acceptance.status = "confirmed"
+    acceptance.confirmed_at = now
+    acceptance.confirmed_by = actor.id
+
+    request.confirmed_count += 1
+
+    # Set donor's last donation date + cooldown
+    donor = db.get(DonorProfile, acceptance.donor_id)
+    if donor is not None:
+        donor.last_donation_date = now.date()
+
+    # Check if request is now fulfilled
+    if request.confirmed_count >= request.donors_needed:
+        request.status = "fulfilled"
+        request.closed_at = now
+
+        # Cancel other pending acceptances
+        pending = db.scalars(
+            select(DonorAcceptance).where(
+                DonorAcceptance.request_id == request_id,
+                DonorAcceptance.status == "accepted",
+            )
+        ).all()
+        for p in pending:
+            p.status = "cancelled"
+            p.cancelled_at = now
+
+    add_audit_log(
+        db,
+        "acceptance.confirmed",
+        actor_user_id=actor.id,
+        target_type="blood_request",
+        target_id=str(request_id),
+        details={
+            "reference_code": request.reference_code,
+            "confirmed_count": request.confirmed_count,
+        },
+    )
+    db.commit()
+    db.refresh(request)
+
+    return {
+        "status": "confirmed",
+        "confirmed_count": request.confirmed_count,
+        "donors_needed": request.donors_needed,
+        "request_status": request.status,
+        "message": (
+            "Request fulfilled. Thank you."
+            if request.status == "fulfilled"
+            else f"{request.donors_needed - request.confirmed_count} more donor(s) needed."
+        ),
+    }
