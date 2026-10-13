@@ -72,3 +72,28 @@ class RequestResponse(BaseModel):
     expires_at: datetime
     created_at: datetime
     hospital: HospitalSummary
+
+class AcceptRequestInfo(BaseModel):
+    id: uuid.UUID
+    reference_code: str
+    blood_type_needed: str
+    urgency: str
+
+
+class AcceptHospitalInfo(BaseModel):
+    id: uuid.UUID
+    name: str
+    address: str
+    lga_name: str
+    state_name: str
+    phone: str
+
+
+class AcceptRequestResponse(BaseModel):
+    acceptance_id: uuid.UUID
+    verification_code: str
+    status: str = "accepted"
+    expires_at: datetime
+    request: AcceptRequestInfo
+    hospital: AcceptHospitalInfo
+    message: str = "Show this code at the hospital when you donate."

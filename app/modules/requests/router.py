@@ -4,9 +4,10 @@ from sqlalchemy.orm import Session as DbSession
 from app.core.database import get_db
 from app.modules.auth.dependencies import AuthContext, get_auth_context
 from app.modules.requests import service
-from app.modules.requests.schemas import CreateRequestPayload, RequestResponse
-
-
+from app.modules.requests.schemas import (
+    CreateRequestPayload, 
+    RequestResponse,
+)
 router = APIRouter(prefix="/requests", tags=["community member"])
 
 
@@ -22,3 +23,4 @@ def create_request(
 ) -> dict:
     """Raise a blood request as an active community member."""
     return service.create_request(db, context.user, payload)
+

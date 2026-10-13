@@ -1,3 +1,4 @@
+import uuid
 from fastapi import APIRouter, Depends, status
 from sqlalchemy.orm import Session as DbSession
 
@@ -10,6 +11,8 @@ from app.modules.donors.schemas import (
     DonorProfileResponse,
     DonorFeedResponse,
 )
+
+from app.modules.requests.schemas import AcceptRequestResponse
 
 
 router = APIRouter(prefix="/donors", tags=["donors"])
@@ -43,3 +46,16 @@ def get_donor_feed(
 ) -> dict:
     """Feed of open requests this donor can help with."""
     return service.get_donor_feed(db, context.user)
+
+@router.post(
+    "/{request_id}/accept",
+    response_model=AcceptRequestResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+def accept_request(
+    request_id: uuid.UUID,
+    context: AuthContext = Depends(get_auth_context),
+    db: DbSession = Depends(get_db),
+) -> dict:
+    """Donor accepts a request, receives a verification code."""
+    return service.accept_request(db, context.user, request_id)
