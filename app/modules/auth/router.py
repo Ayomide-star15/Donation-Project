@@ -58,10 +58,10 @@ def _set_session_cookie(response: Response, token: str) -> None:
         key=settings.SESSION_COOKIE_NAME,
         value=token,
         max_age=settings.SESSION_HOURS * 60 * 60,
-        secure=settings.COOKIE_SECURE,
+        secure=True,
         httponly=True,
-        samesite="lax",
-        domain=settings.COOKIE_DOMAIN,
+        samesite="none",
+        domain=None,
         path="/",
     )
 
@@ -69,7 +69,7 @@ def _set_session_cookie(response: Response, token: str) -> None:
 def _delete_session_cookie(response: Response) -> None:
     response.delete_cookie(
         key=settings.SESSION_COOKIE_NAME,
-        domain=settings.COOKIE_DOMAIN,
+        domain=None,
         path="/",
     )
 
