@@ -8,6 +8,7 @@ from app.modules.donors import service
 from app.modules.donors.schemas import (
     CompleteDonorProfileRequest,
     DonorProfileResponse,
+    DonorFeedResponse,
 )
 
 
@@ -34,3 +35,11 @@ def get_my_donor_profile(
     db: DbSession = Depends(get_db),
 ) -> dict:
     return service.get_donor_profile(db, context.user)
+
+@router.get("/requests", response_model=DonorFeedResponse)
+def get_donor_feed(
+    context: AuthContext = Depends(get_auth_context),
+    db: DbSession = Depends(get_db),
+) -> dict:
+    """Feed of open requests this donor can help with."""
+    return service.get_donor_feed(db, context.user)

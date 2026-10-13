@@ -65,3 +65,34 @@ class DonorProfileResponse(BaseModel):
     is_eligible: bool
     eligible_at: datetime | None
     created_at: datetime
+
+class HospitalForDonor(BaseModel):
+    id: uuid.UUID
+    name: str
+    address: str
+    state_name: str
+    lga_name: str
+    phone: str
+
+
+class DonorFeedItem(BaseModel):
+    id: uuid.UUID
+    reference_code: str
+    blood_type_needed: str
+    donors_needed: int
+    accepted_count: int
+    confirmed_count: int
+    donors_left: int
+    urgency: str
+    status: str
+    match_tier: int
+    note: str | None              # ← sanitized
+    is_eligible: bool             # ← can the donor accept?
+    expires_at: datetime
+    created_at: datetime
+    hospital: HospitalForDonor
+
+
+class DonorFeedResponse(BaseModel):
+    requests: list[DonorFeedItem]
+    total: int
