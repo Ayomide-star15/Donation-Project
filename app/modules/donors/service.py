@@ -5,7 +5,7 @@ from sqlalchemy.orm import Session as DbSession
 from sqlalchemy import or_, select
 from app.modules.donors.models import DonorProfile
 from app.modules.users.models import User
-from app.modules.donors.compatiblity import  recipient_types_donor_can_help
+from app.modules.donors.compatibility import recipient_types_donor_can_help
 from app.modules.requests.models import BloodRequest, BloodRequest
 from app.modules.requests.sanitizer import sanitize_note
 

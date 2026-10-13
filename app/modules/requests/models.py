@@ -68,6 +68,7 @@ class DonorAcceptance(Base):
     donor_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("users.id", ondelete="CASCADE"), index=True
     )
+    verification_code: Mapped[str] = mapped_column(String(6))
     verification_code_hash: Mapped[str] = mapped_column(String(64))
     status: Mapped[str] = mapped_column(
         String(20), default="accepted", server_default="accepted", index=True
