@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-
-from fastapi import Cookie, Depends, HTTPException, status
+from fastapi.security import APIKeyCookie
+from fastapi import Depends, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session as DbSession
 
@@ -12,15 +12,20 @@ from app.core.security import hash_token
 from app.modules.auth.models import Session
 from app.modules.users.models import Role, User, UserRole
 
+session_cookie_scheme = APIKeyCookie(
+    name=settings.SESSION_COOKIE_NAME,
+    scheme_name="session_cookie",
+    description="Opaque session cookie",
+    auto_error=False,
+)
 
 @dataclass
 class AuthContext:
     user: User
     session: Session
 
-
 def get_auth_context(
-    raw_session: str | None = Cookie(default=None, alias=settings.SESSION_COOKIE_NAME),
+    raw_session: str | None = Depends(session_cookie_scheme),
     db: DbSession = Depends(get_db),
 ) -> AuthContext:
     unauthorized = HTTPException(
@@ -31,6 +36,7 @@ def get_auth_context(
         raise unauthorized
 
     session = db.scalar(select(Session).where(Session.token_hash == hash_token(raw_session)))
+    # ... rest unchanged
     if session is None:
         raise unauthorized
 
