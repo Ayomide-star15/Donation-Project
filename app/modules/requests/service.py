@@ -4,7 +4,11 @@ import uuid
 import secrets
 from datetime import UTC, datetime, timedelta
 from fastapi import HTTPException, status
-from sqlalchemy import func, select
+from sqlalchemy import (
+    func, 
+    select, 
+    case
+)
 from sqlalchemy.orm import Session as DbSession
 from app.modules.donors.compatibility import recipient_types_donor_can_help
 from app.modules.audit.service import add_audit_log
@@ -17,7 +21,9 @@ from app.modules.requests.models import (
 from app.modules.requests.schemas import CreateRequestPayload
 from app.modules.users.models import User
 from app.modules.donors.models import DonorProfile
+from app.modules.donors.schemas import DonorUpdateRequest
 from app.modules.locations.models import Lga, State
+from app.modules.communities.models import Community, CommunityAdmin
 
 logger = logging.getLogger(__name__)
 
@@ -689,3 +695,207 @@ def update_donor_profile(
     db.refresh(profile)
 
     return get_donor_profile(db, actor)
+
+
+# =========================================================
+# COMMUNITY ADMIN: list requests from their community
+# =========================================================
+
+def list_community_requests(
+    db: DbSession,
+    actor: User,
+    *,
+    status_filter: str | None = None,
+    urgency_filter: str | None = None,
+    blood_type_filter: str | None = None,
+    search: str | None = None,
+    limit: int = 50,
+    offset: int = 0,
+) -> dict:
+    """Community Admin views all requests from their community."""
+
+    # --- Rule: must be an active Community Admin ---
+    admin_link = db.scalar(
+        select(CommunityAdmin).where(
+            CommunityAdmin.user_id == actor.id,
+            CommunityAdmin.status == "active",
+        )
+    )
+    if admin_link is None:
+        raise HTTPException(403, "You are not a Community Admin")
+
+    community = db.get(Community, admin_link.community_id)
+    if community is None:
+        raise HTTPException(404, "Community not found")
+
+    community_id = community.id
+
+    # --- Base query: requests from this community only ---
+    stmt = select(BloodRequest).where(BloodRequest.community_id == community_id)
+    count_stmt = select(func.count(BloodRequest.id)).where(
+        BloodRequest.community_id == community_id
+    )
+
+    # --- Optional filters ---
+    if status_filter:
+        stmt = stmt.where(BloodRequest.status == status_filter)
+        count_stmt = count_stmt.where(BloodRequest.status == status_filter)
+    if urgency_filter:
+        stmt = stmt.where(BloodRequest.urgency == urgency_filter)
+        count_stmt = count_stmt.where(BloodRequest.urgency == urgency_filter)
+    if blood_type_filter:
+        stmt = stmt.where(BloodRequest.blood_type_needed == blood_type_filter)
+        count_stmt = count_stmt.where(BloodRequest.blood_type_needed == blood_type_filter)
+    if search:
+        like = f"%{search.lower()}%"
+        stmt = stmt.where(func.lower(BloodRequest.reference_code).like(like))
+        count_stmt = count_stmt.where(func.lower(BloodRequest.reference_code).like(like))
+
+    stmt = stmt.order_by(BloodRequest.created_at.desc()).limit(limit).offset(offset)
+
+    rows = list(db.scalars(stmt))
+    total = db.scalar(count_stmt) or 0
+
+    # --- Summary counts (unfiltered — full picture) ---
+    summary_stmt = select(
+        func.count(BloodRequest.id),
+        func.sum(case((BloodRequest.status == "open", 1), else_=0)),
+        func.sum(case((BloodRequest.status == "partial", 1), else_=0)),
+        func.sum(case((BloodRequest.status == "fulfilled", 1), else_=0)),
+        func.sum(case((BloodRequest.status == "expired", 1), else_=0)),
+        func.sum(case((BloodRequest.status == "cancelled", 1), else_=0)),
+    ).where(BloodRequest.community_id == community_id)
+
+    summary_row = db.execute(summary_stmt).one()
+
+    # --- Serialize list ---
+    requests = []
+    for req in rows:
+        requester = db.get(User, req.requester_id)
+        if requester is None:
+            continue
+        requests.append({
+            "id": req.id,
+            "reference_code": req.reference_code,
+            "requester": {
+                "id": requester.id,
+                "full_name": f"{requester.first_name} {requester.last_name}".strip(),
+                "phone": requester.phone,
+            },
+            "blood_type_needed": req.blood_type_needed,
+            "donors_needed": req.donors_needed,
+            "accepted_count": req.accepted_count,
+            "confirmed_count": req.confirmed_count,
+            "donors_left": req.donors_needed - req.accepted_count,
+            "urgency": req.urgency,
+            "status": req.status,
+            "hospital": {
+                "id": req.hospital.id,
+                "name": req.hospital.name,
+                "lga_name": req.hospital.lga.name,
+                "state_name": req.hospital.state.name,
+            },
+            "created_at": req.created_at,
+            "expires_at": req.expires_at,
+        })
+
+    return {
+        "community": {
+            "id": community.id,
+            "name": community.name,
+        },
+        "summary": {
+            "total_requests": summary_row[0] or 0,
+            "open": summary_row[1] or 0,
+            "partial": summary_row[2] or 0,
+            "fulfilled": summary_row[3] or 0,
+            "expired": summary_row[4] or 0,
+            "cancelled": summary_row[5] or 0,
+        },
+        "requests": requests,
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+    }
+
+
+# =========================================================
+# COMMUNITY ADMIN: view one request in detail
+# =========================================================
+
+def get_community_request_detail(
+    db: DbSession,
+    actor: User,
+    request_id: uuid.UUID,
+) -> dict:
+    """Community Admin views one request from their community."""
+
+    admin_link = db.scalar(
+        select(CommunityAdmin).where(
+            CommunityAdmin.user_id == actor.id,
+            CommunityAdmin.status == "active",
+        )
+    )
+    if admin_link is None:
+        raise HTTPException(403, "You are not a Community Admin")
+
+    request = db.get(BloodRequest, request_id)
+    if request is None:
+        raise HTTPException(404, "Request not found")
+
+    # Rule: request must belong to this admin's community
+    if request.community_id != admin_link.community_id:
+        raise HTTPException(403, "This request is not from your community")
+
+    requester = db.get(User, request.requester_id)
+    if requester is None:
+        raise HTTPException(500, "Requester not found")
+
+    # Acceptance activity (anonymous — no donor identities)
+    acceptances = list(
+        db.scalars(
+            select(DonorAcceptance)
+            .where(DonorAcceptance.request_id == request_id)
+            .order_by(DonorAcceptance.accepted_at.desc())
+        )
+    )
+
+    activity = [
+        {
+            "status": a.status,
+            "accepted_at": a.accepted_at,
+            "confirmed_at": a.confirmed_at,
+        }
+        for a in acceptances
+    ]
+
+    return {
+        "id": request.id,
+        "reference_code": request.reference_code,
+        "requester": {
+            "id": requester.id,
+            "full_name": f"{requester.first_name} {requester.last_name}".strip(),
+            "phone": requester.phone,
+            "email": requester.email,
+        },
+        "blood_type_needed": request.blood_type_needed,
+        "donors_needed": request.donors_needed,
+        "accepted_count": request.accepted_count,
+        "confirmed_count": request.confirmed_count,
+        "donors_left": request.donors_needed - request.accepted_count,
+        "urgency": request.urgency,
+        "status": request.status,
+        "notes": request.notes,
+        "hospital": {
+            "id": request.hospital.id,
+            "name": request.hospital.name,
+            "address": request.hospital.address,
+            "lga_name": request.hospital.lga.name,
+            "state_name": request.hospital.state.name,
+            "phone": request.hospital.phone,
+        },
+        "acceptance_activity": activity,
+        "created_at": request.created_at,
+        "expires_at": request.expires_at,
+        "closed_at": request.closed_at,
+    }
