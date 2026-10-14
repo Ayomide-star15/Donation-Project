@@ -19,6 +19,7 @@ from app.modules.requests.community_router import router as community_requests_r
 from app.modules.admin.community_router import router as admin_communities_router
 from app.modules.admin.router import router as admin_router
 from app.modules.admin.request_router import router as admin_requests_router
+from app.modules.admin.dashboard_router import router as admin_dashboard_router
 
 app = FastAPI(title=settings.APP_NAME)
 app.add_middleware(
@@ -34,6 +35,7 @@ app.include_router(hospitals_admin_router, prefix=settings.API_V1_PREFIX)
 app.include_router(admin_router, prefix=settings.API_V1_PREFIX)
 app.include_router(admin_requests_router, prefix=settings.API_V1_PREFIX)
 app.include_router(admin_communities_router, prefix=settings.API_V1_PREFIX)
+app.include_router(admin_dashboard_router, prefix=settings.API_V1_PREFIX)
 app.include_router(hospitals_public_router, prefix=settings.API_V1_PREFIX)
 app.include_router(invites_router, prefix=settings.API_V1_PREFIX)
 app.include_router(public_invites_router, prefix=settings.API_V1_PREFIX)
