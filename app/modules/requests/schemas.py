@@ -2,8 +2,13 @@ import uuid
 from datetime import datetime
 from enum import Enum
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
-
+from pydantic import (
+    BaseModel, 
+    ConfigDict, 
+    Field, 
+    field_validator,
+    EmailStr
+)
 
 class BloodType(str, Enum):
     A_pos = "A+"
@@ -54,7 +59,6 @@ class HospitalSummary(BaseModel):
     state_name: str
     lga_name: str
     phone: str
-
 
 class RequestResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
@@ -180,4 +184,73 @@ class CancelAcceptanceResponse(BaseModel):
     status: str = "cancelled"
     message: str
 
+class RequesterForList(BaseModel):
+    id: uuid.UUID
+    full_name: str
+    phone: str | None
 
+
+class RequesterForDetail(BaseModel):
+    id: uuid.UUID
+    full_name: str
+    phone: str | None
+    email: EmailStr
+
+
+class CommunityRequestListItem(BaseModel):
+    id: uuid.UUID
+    reference_code: str
+    requester: RequesterForList
+    blood_type_needed: str
+    donors_needed: int
+    accepted_count: int
+    confirmed_count: int
+    donors_left: int
+    urgency: str
+    status: str
+    hospital: dict
+    created_at: datetime
+    expires_at: datetime
+
+
+class CommunityRequestSummary(BaseModel):
+    total_requests: int
+    open: int
+    partial: int
+    fulfilled: int
+    expired: int
+    cancelled: int
+
+
+class CommunityRequestsListResponse(BaseModel):
+    community: dict
+    summary: CommunityRequestSummary
+    requests: list[CommunityRequestListItem]
+    total: int
+    limit: int
+    offset: int
+
+
+class AcceptanceActivityItem(BaseModel):
+    status: str
+    accepted_at: datetime
+    confirmed_at: datetime | None
+
+
+class CommunityRequestDetailResponse(BaseModel):
+    id: uuid.UUID
+    reference_code: str
+    requester: RequesterForDetail
+    blood_type_needed: str
+    donors_needed: int
+    accepted_count: int
+    confirmed_count: int
+    donors_left: int
+    urgency: str
+    status: str
+    notes: str | None
+    hospital: dict
+    acceptance_activity: list[AcceptanceActivityItem]
+    created_at: datetime
+    expires_at: datetime
+    closed_at: datetime | None
