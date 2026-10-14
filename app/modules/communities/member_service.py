@@ -207,7 +207,7 @@ def invite_member(
     )
     db.commit()
     db.refresh(member)
-    return member
+    return _serialize_member(member)
 
 
 # =========================================================
