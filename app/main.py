@@ -16,7 +16,7 @@ from app.modules.donors.router import router as donors_router
 from app.modules.communities.me_router import router as me_router
 from app.modules.requests.router import router as requests_router
 from app.modules.requests.community_router import router as community_requests_router
-
+from app.modules.admin.router import router as admin_router
 app = FastAPI(title=settings.APP_NAME)
 app.add_middleware(
     CORSMiddleware,
@@ -28,6 +28,7 @@ app.add_middleware(
 app.include_router(auth_router, prefix=settings.API_V1_PREFIX)
 app.include_router(locations_router, prefix=settings.API_V1_PREFIX)
 app.include_router(hospitals_admin_router, prefix=settings.API_V1_PREFIX)
+app.include_router(admin_router, prefix=settings.API_V1_PREFIX)
 app.include_router(hospitals_public_router, prefix=settings.API_V1_PREFIX)
 app.include_router(invites_router, prefix=settings.API_V1_PREFIX)
 app.include_router(public_invites_router, prefix=settings.API_V1_PREFIX)
