@@ -38,7 +38,7 @@ class MemberResponse(BaseModel):
     user_id: uuid.UUID | None
     full_name: str
     email: EmailStr
-    phone: str | None
+    phone: str | None = None
     method: str
     status: str
     rejection_reason: str | None
