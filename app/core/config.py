@@ -28,8 +28,7 @@ class Settings(BaseSettings):
     SESSION_HOURS: int = 8
     SESSION_IDLE_MINUTES: int = 60
 
-    FRONTEND_URL: str = ("http://localhost:3000,"
-                          "https://lifesource-web-seven.vercel.app")
+    FRONTEND_URL: str = "http://localhost:3000"
     API_PUBLIC_URL: str = "http://127.0.0.1:8000"
     SESSION_COOKIE_NAME: str = "lifesource_session"
     COOKIE_SECURE: bool = False
@@ -43,11 +42,6 @@ class Settings(BaseSettings):
     SMTP_USERNAME: str | None = None
     SMTP_PASSWORD: SecretStr | None = None
     SMTP_USE_TLS: bool = False
-
-    @property
-    def frontend_origins(self) -> list[str]:
-        """Comma-separated FRONTEND_URL → list of clean origins for CORS."""
-        return [o.strip() for o in self.FRONTEND_URL.split(",") if o.strip()]
 
     @field_validator("COOKIE_DOMAIN", mode="before")
     @classmethod
