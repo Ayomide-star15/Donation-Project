@@ -1,5 +1,5 @@
 from functools import lru_cache
-from typing import Literal
+from typing import Literal, Self
 
 from pydantic import SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -29,6 +29,7 @@ class Settings(BaseSettings):
     SESSION_IDLE_MINUTES: int = 60
 
     FRONTEND_URL: str = "http://localhost:3000"
+    ALLOWED_ORIGINS: str = "http://localhost:3000,https://lifesource-web-seven.vercel.app"
     API_PUBLIC_URL: str = "http://127.0.0.1:8000"
     SESSION_COOKIE_NAME: str = "lifesource_session"
     COOKIE_SECURE: bool = False
@@ -42,6 +43,11 @@ class Settings(BaseSettings):
     SMTP_USERNAME: str | None = None
     SMTP_PASSWORD: SecretStr | None = None
     SMTP_USE_TLS: bool = False
+
+    @property
+    def frontend_origins(self) -> list[str]:
+        return [o.strip() for o in self.ALLOWED_ORIGINS.split(",") if o.strip()]
+
 
     @field_validator("COOKIE_DOMAIN", mode="before")
     @classmethod
@@ -66,7 +72,7 @@ class Settings(BaseSettings):
         return value
 
     @model_validator(mode="after")
-    def validate_production_secrets(self) -> "Settings":
+    def validate_production_secrets(self) -> "Self":
         if self.OTP_MODE == "fixed":
             if self.ENVIRONMENT.lower() == "production":
                 raise ValueError("Fixed OTP mode is forbidden in production")
