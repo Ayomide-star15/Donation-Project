@@ -28,7 +28,7 @@ class Settings(BaseSettings):
     SESSION_HOURS: int = 8
     SESSION_IDLE_MINUTES: int = 60
 
-    FRONTEND_URL: str = "http://localhost:3000"
+    FRONTEND_URL: str = "https://lifesource-web-seven.vercel.app"
     ALLOWED_ORIGINS: str = "http://localhost:3000,https://lifesource-web-seven.vercel.app"
     API_PUBLIC_URL: str = "http://127.0.0.1:8000"
     SESSION_COOKIE_NAME: str = "lifesource_session"
